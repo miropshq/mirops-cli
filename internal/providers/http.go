@@ -5,13 +5,13 @@ import (
 	"net/http"
 )
 
-type HTTProvider struct{}
+type HTTPProvider struct{}
 
-func NewHTTP() *HTTProvider {
-	return &HTTProvider{}
+func NewHTTP() *HTTPProvider {
+	return &HTTPProvider{}
 }
 
-func (p *HTTProvider) Fetch(source string) ([]byte, error) {
+func (p *HTTPProvider) Fetch(source string) ([]byte, error) {
 	resp, err := http.Get(source)
 	if err != nil {
 		return nil, err
