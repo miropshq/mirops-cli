@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/miropshq/mirops-cli/internal/providers"
+	"github.com/miropshq/mirops-cli/internal/report"
 	"github.com/spf13/cobra"
 )
 
@@ -24,19 +25,6 @@ var (
 	timeout       time.Duration
 	retry         int
 )
-
-type Report struct {
-	GeneratedAt    string `json:"generatedAt"`
-	TTLSeconds     int    `json:"ttlSeconds"`
-	Cluster        string `json:"cluster"`
-	ClusterName    string `json:"clusterName"`
-	ClusterVersion string `json:"clusterVersion"`
-	TargetVersion  string `json:"targetVersion"`
-	RiskScore      int    `json:"riskScore"`
-	Threshold      int    `json:"threshold"`
-	Allow          bool   `json:"allow"`
-	Reason         string `json:"reason"`
-}
 
 // isSaaSMode returns true when any SaaS flag or its env var is set.
 func isSaaSMode(cmd *cobra.Command) bool {
@@ -139,31 +127,30 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 			os.Exit(2)
 		}
 
-		var report Report
-		if err := json.Unmarshal(data, &report); err != nil {
+		var r report.Report
+		if err := json.Unmarshal(data, &r); err != nil {
 			fmt.Fprintf(os.Stderr, "Invalid JSON: %v\n", err)
 			os.Exit(2)
 		}
 
 		// Use the report's threshold unless the flag was explicitly passed
-		effectiveThreshold := threshold
-		if !cmd.Flags().Changed("threshold") && report.Threshold > 0 {
-			effectiveThreshold = report.Threshold
+		var thresholdOverride int
+		if cmd.Flags().Changed("threshold") {
+			thresholdOverride = threshold
 		}
-
-		blocked := report.RiskScore > effectiveThreshold
+		blocked, effectiveThreshold := r.Analyze(thresholdOverride)
 
 		switch output {
 		case "json":
 			result := map[string]interface{}{
-				"cluster":        report.Cluster,
-				"clusterName":    report.ClusterName,
-				"clusterVersion": report.ClusterVersion,
-				"targetVersion":  report.TargetVersion,
-				"riskScore":      report.RiskScore,
+				"cluster":        r.Cluster,
+				"clusterName":    r.ClusterName,
+				"clusterVersion": r.ClusterVersion,
+				"targetVersion":  r.TargetVersion,
+				"riskScore":      r.RiskScore,
 				"threshold":      effectiveThreshold,
 				"allow":          !blocked,
-				"reason":         report.Reason,
+				"reason":         r.Reason,
 			}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
@@ -172,12 +159,12 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 			fmt.Fprintln(w, "Mirops Upgrade Analysis")
 			fmt.Fprintln(w, "─────────────────────────────────────")
-			fmt.Fprintf(w, "Cluster:\t%s (%s)\n", report.ClusterName, report.Cluster)
-			fmt.Fprintf(w, "Cluster Version:\t%s\n", report.ClusterVersion)
-			fmt.Fprintf(w, "Target Version:\t%s\n", report.TargetVersion)
-			fmt.Fprintf(w, "Risk Score:\t%d\n", report.RiskScore)
+			fmt.Fprintf(w, "Cluster:\t%s (%s)\n", r.ClusterName, r.Cluster)
+			fmt.Fprintf(w, "Cluster Version:\t%s\n", r.ClusterVersion)
+			fmt.Fprintf(w, "Target Version:\t%s\n", r.TargetVersion)
+			fmt.Fprintf(w, "Risk Score:\t%d\n", r.RiskScore)
 			fmt.Fprintf(w, "Threshold:\t%d\n", effectiveThreshold)
-			fmt.Fprintf(w, "Reason:\t%s\n", report.Reason)
+			fmt.Fprintf(w, "Reason:\t%s\n", r.Reason)
 			w.Flush()
 			if blocked {
 				fmt.Println("❌ BLOCKED")
