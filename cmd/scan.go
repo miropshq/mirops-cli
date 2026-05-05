@@ -138,19 +138,20 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 		if cmd.Flags().Changed("threshold") {
 			thresholdOverride = threshold
 		}
-		blocked, effectiveThreshold := r.Analyze(thresholdOverride)
+		blocked, level, effectiveThreshold := r.Analyze(thresholdOverride)
 
 		switch output {
 		case "json":
 			result := map[string]interface{}{
 				"cluster":        r.Cluster,
-				"clusterName":    r.ClusterName,
 				"clusterVersion": r.ClusterVersion,
 				"targetVersion":  r.TargetVersion,
-				"riskScore":      r.RiskScore,
+				"riskScore":      r.Scores.Total,
 				"threshold":      effectiveThreshold,
+				"level":          level,
 				"allow":          !blocked,
 				"reason":         r.Reason,
+				"issues":         r.Issues,
 			}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
@@ -159,17 +160,32 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 			fmt.Fprintln(w, "Mirops Upgrade Analysis")
 			fmt.Fprintln(w, "─────────────────────────────────────")
-			fmt.Fprintf(w, "Cluster:\t%s (%s)\n", r.ClusterName, r.Cluster)
+			fmt.Fprintf(w, "Cluster:\t%s\n", r.Cluster)
 			fmt.Fprintf(w, "Cluster Version:\t%s\n", r.ClusterVersion)
 			fmt.Fprintf(w, "Target Version:\t%s\n", r.TargetVersion)
-			fmt.Fprintf(w, "Risk Score:\t%d\n", r.RiskScore)
+			fmt.Fprintln(w, "─────────────────────────────────────")
+			fmt.Fprintf(w, "Score Total:\t%d / 100\n", r.Scores.Total)
+			fmt.Fprintf(w, "  Health (×25):\t%d\n", r.Scores.Health)
+			fmt.Fprintf(w, "  Capacity (×30):\t%d\n", r.Scores.Capacity)
+			fmt.Fprintf(w, "  Stability (×20):\t%d\n", r.Scores.Stability)
+			fmt.Fprintf(w, "  Risk (×25):\t%d\n", r.Scores.Risk)
+			fmt.Fprintln(w, "─────────────────────────────────────")
 			fmt.Fprintf(w, "Threshold:\t%d\n", effectiveThreshold)
 			fmt.Fprintf(w, "Reason:\t%s\n", r.Reason)
+			if len(r.Issues) > 0 {
+				fmt.Fprintln(w, "Issues:")
+				for _, issue := range r.Issues {
+					fmt.Fprintf(w, "  · %s\n", issue)
+				}
+			}
 			w.Flush()
-			if blocked {
-				fmt.Println("❌ BLOCKED")
-			} else {
-				fmt.Println("✔ SAFE")
+			switch level {
+			case "BLOCK":
+				fmt.Println("❌ BLOCK — Do not upgrade, cluster is unhealthy")
+			case "WARNING":
+				fmt.Println("⚠️  WARNING — Upgrade possible but issues detected")
+			default:
+				fmt.Println("✔ SAFE — Cluster ready, upgrade recommended")
 			}
 		}
 
