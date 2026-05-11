@@ -1,1 +1,44 @@
-/report.json
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor and IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment and local config
+.env
+.env.*
+!.env.example
+*.local
+
+# Go build, test, and coverage output
+bin/
+dist/
+build/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+coverage.html
+*.coverprofile
+*.prof
+*.pprof
+
+# Go workspace and dependency caches
+go.work
+go.work.sum
+vendor/
+
+# Local reports and logs
+report.json
+mirops-report.json
+*.log
