@@ -42,3 +42,7 @@ vendor/
 report.json
 mirops-report.json
 *.log
+
+# Generated reports (keep the CLI instructions)
+reports/
+!reports/CLAUDE.md

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"text/tabwriter"
 	"time"
@@ -153,6 +154,23 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 				"reason":         r.Reason,
 				"issues":         r.Issues,
 			}
+			// Emit AI scoring metadata when present.
+			if r.Scores.AI != nil {
+				result["ai"] = r.Scores.AI
+			}
+			if r.AIReasoning != "" {
+				result["aiReasoning"] = r.AIReasoning
+			}
+			// Emit the logical-mirror sections for other tools (omit when absent).
+			if len(r.Addons) > 0 {
+				result["addons"] = r.Addons
+			}
+			if r.Risk != nil {
+				result["risk"] = r.Risk
+			}
+			if r.Graph != nil {
+				result["graph"] = r.Graph
+			}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
 			enc.Encode(result)
@@ -169,9 +187,23 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 			fmt.Fprintf(w, "  Capacity (×30):\t%d\n", r.Scores.Capacity)
 			fmt.Fprintf(w, "  Stability (×20):\t%d\n", r.Scores.Stability)
 			fmt.Fprintf(w, "  Risk (×25):\t%d\n", r.Scores.Risk)
+			if ai := r.Scores.AI; ai != nil {
+				weight := ai.Weight
+				if weight == "" {
+					weight = "n/a"
+				}
+				line := fmt.Sprintf("  AI (%s):\t%d", weight, ai.Score)
+				if ai.Model != "" {
+					line += fmt.Sprintf("  [%s]", ai.Model)
+				}
+				fmt.Fprintln(w, line)
+			}
 			fmt.Fprintln(w, "─────────────────────────────────────")
 			fmt.Fprintf(w, "Threshold:\t%d\n", effectiveThreshold)
 			fmt.Fprintf(w, "Reason:\t%s\n", r.Reason)
+			if r.AIReasoning != "" {
+				fmt.Fprintf(w, "AI Reasoning:\t%s\n", r.AIReasoning)
+			}
 			if len(r.Issues) > 0 {
 				fmt.Fprintln(w, "Issues:")
 				for _, issue := range r.Issues {
@@ -179,6 +211,11 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 				}
 			}
 			w.Flush()
+
+			renderAddons(r.Addons)
+			renderNamespaceRisk(r.Risk)
+			renderMirrorSummary(r)
+
 			switch level {
 			case "BLOCK":
 				fmt.Println("❌ BLOCK — Do not upgrade, cluster is unhealthy")
@@ -193,6 +230,84 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 			os.Exit(1)
 		}
 	},
+}
+
+// renderAddons prints the add-on compatibility table. Skips when there are none.
+func renderAddons(addons []report.AddonCompatibility) {
+	if len(addons) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Println("ADD-ONS")
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	for _, a := range addons {
+		version := a.Version
+		if version == "" {
+			version = "-"
+		}
+		var status string
+		switch a.Status {
+		case "compatible":
+			status = "✓ compatible"
+		case "incompatible":
+			status = "✗ incompatible"
+			if a.RequiredVersion != "" {
+				status += fmt.Sprintf("\t→ upgrade to %s", a.RequiredVersion)
+			}
+		default:
+			status = "? unknown"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\n", a.Name, version, status)
+	}
+	w.Flush()
+}
+
+// renderNamespaceRisk prints per-namespace risk, sorted desc, skipping risk 0.
+func renderNamespaceRisk(risk *report.RiskBreakdown) {
+	if risk == nil || len(risk.ByNamespace) == 0 {
+		return
+	}
+	rows := make([]report.NamespaceRisk, 0, len(risk.ByNamespace))
+	for _, ns := range risk.ByNamespace {
+		if ns.Risk > 0 {
+			rows = append(rows, ns)
+		}
+	}
+	if len(rows) == 0 {
+		return
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Risk > rows[j].Risk })
+
+	fmt.Println()
+	fmt.Println("NAMESPACE RISK")
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	for _, ns := range rows {
+		severity := fmt.Sprintf("%s (%d)", report.RiskSeverity(ns.Risk), ns.Risk)
+		fmt.Fprintf(w, "%s\t%s\t%d/%d at risk\n", ns.Namespace, severity, ns.AtRisk, ns.Components)
+	}
+	w.Flush()
+}
+
+// renderMirrorSummary prints a one-line summary of the logical mirror.
+func renderMirrorSummary(r report.Report) {
+	if r.Graph == nil {
+		return
+	}
+	atRisk := 0
+	for _, n := range r.Graph.Nodes {
+		if n.Risk >= 50 {
+			atRisk++
+		}
+	}
+	incompatible := 0
+	for _, a := range r.Addons {
+		if a.Status == "incompatible" {
+			incompatible++
+		}
+	}
+	fmt.Println()
+	fmt.Printf("MIRROR: %d components, %d at risk, %d incompatible add-ons\n",
+		len(r.Graph.Nodes), atRisk, incompatible)
 }
 
 func init() {
