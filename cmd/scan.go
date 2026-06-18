@@ -154,8 +154,8 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 				"reason":         r.Reason,
 				"issues":         r.Issues,
 			}
-			// Emit AI scoring metadata when present.
-			if r.Scores.AI != nil {
+			// Emit AI scoring metadata only when AI actually ran.
+			if r.Scores.AI.Ran() {
 				result["ai"] = r.Scores.AI
 			}
 			if r.AIReasoning != "" {
@@ -183,16 +183,14 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 			fmt.Fprintf(w, "Target Version:\t%s\n", r.TargetVersion)
 			fmt.Fprintln(w, "─────────────────────────────────────")
 			fmt.Fprintf(w, "Score Total:\t%d / 100\n", r.Scores.Total)
-			fmt.Fprintf(w, "  Health (×25):\t%d\n", r.Scores.Health)
-			fmt.Fprintf(w, "  Capacity (×30):\t%d\n", r.Scores.Capacity)
-			fmt.Fprintf(w, "  Stability (×20):\t%d\n", r.Scores.Stability)
-			fmt.Fprintf(w, "  Risk (×25):\t%d\n", r.Scores.Risk)
-			if ai := r.Scores.AI; ai != nil {
-				weight := ai.Weight
-				if weight == "" {
-					weight = "n/a"
-				}
-				line := fmt.Sprintf("  AI (%s):\t%d", weight, ai.Score)
+			if b := r.Scores.Base; b != nil {
+				fmt.Fprintf(w, "  Health:\t%d\n", b.Health)
+				fmt.Fprintf(w, "  Capacity:\t%d\n", b.Capacity)
+				fmt.Fprintf(w, "  Stability:\t%d\n", b.Stability)
+				fmt.Fprintf(w, "  Risk:\t%d\n", b.Risk)
+			}
+			if ai := r.Scores.AI; ai.Ran() {
+				line := fmt.Sprintf("  AI (%s):\t%d", ai.Weight, ai.Score)
 				if ai.Model != "" {
 					line += fmt.Sprintf("  [%s]", ai.Model)
 				}

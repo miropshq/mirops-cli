@@ -1,12 +1,21 @@
 package report
 
 type Scores struct {
-	Total     int       `json:"total"`
-	Health    int       `json:"health"`
-	Capacity  int       `json:"capacity"`
-	Stability int       `json:"stability"`
-	Risk      int       `json:"risk"`
-	AI        *AIScores `json:"ai,omitempty"`
+	Total int        `json:"total"`
+	Base  *BaseScore `json:"base,omitempty"`
+	AI    *AIScores  `json:"ai,omitempty"`
+}
+
+// BaseScore holds the non-AI scoring breakdown (the values are post-weight
+// contributions that sum to Score).
+type BaseScore struct {
+	Score        int    `json:"score"`
+	Weight       string `json:"weight"` // e.g. "100%"
+	Contribution int    `json:"contribution"`
+	Health       int    `json:"health"`
+	Capacity     int    `json:"capacity"`
+	Stability    int    `json:"stability"`
+	Risk         int    `json:"risk"`
 }
 
 // AIScores holds the AI-assisted scoring; present only when AI scoring ran.
@@ -15,6 +24,11 @@ type AIScores struct {
 	Weight       string `json:"weight"` // e.g. "30%"
 	Contribution int    `json:"contribution"`
 	Model        string `json:"model,omitempty"` // model used (e.g. claude-sonnet-4-6)
+}
+
+// Ran reports whether AI scoring actually produced a result.
+func (a *AIScores) Ran() bool {
+	return a != nil && (a.Weight != "" || a.Score != 0 || a.Model != "")
 }
 
 type Decision struct {
