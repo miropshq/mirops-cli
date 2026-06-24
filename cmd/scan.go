@@ -19,8 +19,8 @@ var (
 	apiURL        string
 	apiToken      string
 	cluster       string
-	threshold     int
 	enforce       bool
+	enforceLevel  string
 	targetVersion string
 	output        string
 	timeout       time.Duration
@@ -54,15 +54,13 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 		if cluster == "" {
 			cluster = os.Getenv("MIROPS_CLUSTER")
 		}
-		if !cmd.Flags().Changed("threshold") {
-			if v := os.Getenv("MIROPS_THRESHOLD"); v != "" {
-				if n, err := strconv.Atoi(v); err == nil {
-					threshold = n
-				}
-			}
-		}
 		if !cmd.Flags().Changed("enforce") {
 			enforce = os.Getenv("MIROPS_ENFORCE") == "true"
+		}
+		if !cmd.Flags().Changed("enforce-level") {
+			if v := os.Getenv("MIROPS_ENFORCE_LEVEL"); v != "" {
+				enforceLevel = v
+			}
 		}
 		if targetVersion == "" {
 			targetVersion = os.Getenv("MIROPS_TARGET_VERSION")
@@ -134,12 +132,8 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 			os.Exit(2)
 		}
 
-		// Use the report's threshold unless the flag was explicitly passed
-		var thresholdOverride int
-		if cmd.Flags().Changed("threshold") {
-			thresholdOverride = threshold
-		}
-		blocked, level, effectiveThreshold := r.Analyze(thresholdOverride)
+		// Trust the operator's decision — gate and level come from the report.
+		allow, level, blockers := r.Analyze()
 
 		switch output {
 		case "json":
@@ -148,9 +142,9 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 				"clusterVersion": r.ClusterVersion,
 				"targetVersion":  r.TargetVersion,
 				"riskScore":      r.Scores.Total,
-				"threshold":      effectiveThreshold,
 				"level":          level,
-				"allow":          !blocked,
+				"allow":          allow,
+				"blockers":       blockers,
 				"reason":         r.Reason,
 				"issues":         r.Issues,
 			}
@@ -197,7 +191,6 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 				fmt.Fprintln(w, line)
 			}
 			fmt.Fprintln(w, "─────────────────────────────────────")
-			fmt.Fprintf(w, "Threshold:\t%d\n", effectiveThreshold)
 			fmt.Fprintf(w, "Reason:\t%s\n", r.Reason)
 			if r.AIReasoning != "" {
 				fmt.Fprintf(w, "AI Reasoning:\t%s\n", r.AIReasoning)
@@ -215,8 +208,11 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 			renderMirrorSummary(r)
 
 			switch level {
-			case "BLOCK":
-				fmt.Println("❌ BLOCK — Do not upgrade, cluster is unhealthy")
+			case "CRITICAL":
+				fmt.Println("❌ CRITICAL — Do not upgrade")
+				for _, b := range blockers {
+					fmt.Printf("   • %s\n", b)
+				}
 			case "WARNING":
 				fmt.Println("⚠️  WARNING — Upgrade possible but issues detected")
 			default:
@@ -224,7 +220,9 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 			}
 		}
 
-		if enforce && blocked {
+		// Gate the pipeline. Default: fail only when the upgrade is not allowed
+		// (CRITICAL). --enforce-level=warning is stricter (also fails on WARNING).
+		if enforce && (!allow || report.Severity(level) >= report.Severity(enforceLevel)) {
 			os.Exit(1)
 		}
 	},
@@ -320,8 +318,8 @@ func init() {
 	scanCmd.Flags().StringVar(&cluster, "cluster", "", "[SaaS] Cluster identifier (env: MIROPS_CLUSTER)")
 
 	// Common flags
-	scanCmd.Flags().IntVar(&threshold, "threshold", 70, "Risk threshold (env: MIROPS_THRESHOLD)")
-	scanCmd.Flags().BoolVar(&enforce, "enforce", false, "Block pipeline if risk exceeds threshold (env: MIROPS_ENFORCE)")
+	scanCmd.Flags().BoolVar(&enforce, "enforce", false, "Fail the pipeline based on the operator's decision (env: MIROPS_ENFORCE)")
+	scanCmd.Flags().StringVar(&enforceLevel, "enforce-level", "critical", "Minimum level that fails --enforce: critical | warning (env: MIROPS_ENFORCE_LEVEL)")
 	scanCmd.Flags().StringVar(&targetVersion, "target-version", "", "Expected target version to validate (env: MIROPS_TARGET_VERSION)")
 	scanCmd.Flags().StringVar(&output, "output", "table", "Output format: table, json (env: MIROPS_OUTPUT)")
 	scanCmd.Flags().DurationVar(&timeout, "timeout", 30*time.Second, "Request timeout (env: MIROPS_TIMEOUT)")

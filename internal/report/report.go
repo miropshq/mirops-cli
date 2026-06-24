@@ -1,5 +1,7 @@
 package report
 
+import "strings"
+
 type Scores struct {
 	Total int        `json:"total"`
 	Base  *BaseScore `json:"base,omitempty"`
@@ -32,9 +34,9 @@ func (a *AIScores) Ran() bool {
 }
 
 type Decision struct {
-	Threshold int    `json:"threshold"`
-	Allow     bool   `json:"allow"`
-	Level     string `json:"level"`
+	Allow    bool     `json:"allow"`              // THE gate: true = upgrade allowed
+	Level    string   `json:"level"`              // SAFE | WARNING | CRITICAL
+	Blockers []string `json:"blockers,omitempty"` // every reason the upgrade is CRITICAL
 }
 
 type Report struct {
@@ -113,24 +115,22 @@ func RiskSeverity(risk int) string {
 	}
 }
 
-// Analyze evaluates the report against the given threshold.
-// If thresholdOverride is 0, the report's own threshold is used.
-// Returns: blocked, level (BLOCK/WARNING/SAFE), effectiveThreshold
-func (r *Report) Analyze(thresholdOverride int) (blocked bool, level string, effectiveThreshold int) {
-	effectiveThreshold = thresholdOverride
-	if effectiveThreshold == 0 && r.Decision.Threshold > 0 {
-		effectiveThreshold = r.Decision.Threshold
-	}
-	switch {
-	case r.Scores.Total < effectiveThreshold:
-		blocked = true
-		level = "BLOCK"
-	case r.Scores.Total < 90:
-		blocked = false
-		level = "WARNING"
+// Analyze returns the operator's decision verbatim. The gate and level come from
+// the report (deterministic facts computed by the operator), NOT from the score —
+// scores.total is a readiness gauge only and never blocks.
+func (r *Report) Analyze() (allow bool, level string, blockers []string) {
+	return r.Decision.Allow, r.Decision.Level, r.Decision.Blockers
+}
+
+// Severity ranks a decision level for comparison (higher = worse).
+// Case-insensitive; unknown/empty levels rank as SAFE.
+func Severity(level string) int {
+	switch strings.ToUpper(level) {
+	case "CRITICAL":
+		return 2
+	case "WARNING":
+		return 1
 	default:
-		blocked = false
-		level = "SAFE"
+		return 0
 	}
-	return
 }

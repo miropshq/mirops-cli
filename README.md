@@ -9,9 +9,9 @@ The CLI is designed to consume reports produced by the `mirops` Kubernetes opera
 - Reads reports from local files and `file://` sources
 - Supports `http://` and `https://` report URLs
 - Supports `s3://` and `azure://` report sources through provider implementations
-- Evaluates report score against a threshold
+- Renders the operator's upgrade decision (`SAFE` / `WARNING` / `CRITICAL`)
 - Prints table or JSON output
-- Can enforce the decision by exiting with code `1` when blocked
+- Can enforce the decision by exiting with code `1` when the upgrade is not allowed
 - Supports environment-variable fallbacks for automation
 
 ## Requirements
@@ -56,16 +56,16 @@ Emit JSON:
 mirops scan --source ./mirops-report.json --output json
 ```
 
-Use a custom threshold:
-
-```sh
-mirops scan --source ./mirops-report.json --threshold 80
-```
-
-Fail the pipeline when the decision is blocked:
+Fail the pipeline when the upgrade is not allowed (CRITICAL):
 
 ```sh
 mirops scan --source ./mirops-report.json --enforce
+```
+
+Fail also on WARNING (stricter policy):
+
+```sh
+mirops scan --source ./mirops-report.json --enforce --enforce-level warning
 ```
 
 ## Command Reference
@@ -77,8 +77,8 @@ mirops scan [flags]
 | Flag | Environment variable | Description |
 | ---- | -------------------- | ----------- |
 | `--source` | `MIROPS_SOURCE` | Report source: path, `file://`, `s3://`, `azure://`, `http://`, or `https://` |
-| `--threshold` | `MIROPS_THRESHOLD` | Minimum score required before the result is blocked |
-| `--enforce` | `MIROPS_ENFORCE` | Exit with code `1` when the result is blocked |
+| `--enforce` | `MIROPS_ENFORCE` | Exit with code `1` based on the report's decision |
+| `--enforce-level` | `MIROPS_ENFORCE_LEVEL` | Minimum level that fails `--enforce`: `critical` (default) or `warning` |
 | `--target-version` | `MIROPS_TARGET_VERSION` | Expected target version |
 | `--output` | `MIROPS_OUTPUT` | Output format: `table` or `json` |
 | `--timeout` | `MIROPS_TIMEOUT` | Request timeout duration |
@@ -94,15 +94,15 @@ SaaS-related flags are present but not implemented yet:
 
 ## Decision Logic
 
-The CLI uses the report score and threshold to produce one of three results:
+The decision is computed by the `mirops` operator from deterministic facts (incompatible add-ons, lost PVCs, PDBs, CPU/memory pressure, pods not ready) and reported in `decision`. The CLI renders it verbatim — it does **not** recompute the gate from the score (`scores.total` is a readiness gauge only).
 
 | Result | Meaning |
 | ------ | ------- |
-| `BLOCK` | Score is below the effective threshold |
-| `WARNING` | Score is at or above the threshold, but below 90 |
-| `SAFE` | Score is 90 or above |
+| `CRITICAL` | `decision.allow == false` — do not upgrade; reasons listed as blockers |
+| `WARNING` | Upgrade possible but issues were detected |
+| `SAFE` | Cluster ready, upgrade recommended |
 
-If `--threshold` is not provided, the CLI uses the threshold embedded in the report. If the report does not include a threshold, the default flag value is used.
+With `--enforce`, the CLI exits `1` when the upgrade is not allowed (CRITICAL). `--enforce-level warning` is stricter and also fails on WARNING.
 
 ## Development
 
