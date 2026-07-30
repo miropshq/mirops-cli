@@ -181,7 +181,7 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 				fmt.Fprintf(w, "  Health:\t%d\n", b.Health)
 				fmt.Fprintf(w, "  Capacity:\t%d\n", b.Capacity)
 				fmt.Fprintf(w, "  Stability:\t%d\n", b.Stability)
-				fmt.Fprintf(w, "  Risk:\t%d\n", b.Risk)
+				fmt.Fprintf(w, "  Compatibility:\t%d\n", b.Compatibility)
 			}
 			if ai := r.Scores.AI; ai.Ran() {
 				line := fmt.Sprintf("  AI (%s):\t%d", ai.Weight, ai.Score)

@@ -17,7 +17,9 @@ type BaseScore struct {
 	Health       int    `json:"health"`
 	Capacity     int    `json:"capacity"`
 	Stability    int    `json:"stability"`
-	Risk         int    `json:"risk"`
+	// Compatibility is a score dimension: HIGHER = BETTER. Not to be confused
+	// with graph risk (Report.Risk, NamespaceRisk.Risk) where higher = worse.
+	Compatibility int `json:"compatibility"`
 }
 
 // AIScores holds the AI-assisted scoring; present only when AI scoring ran.
