@@ -207,16 +207,21 @@ SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report 
 			renderNamespaceRisk(r.Risk)
 			renderMirrorSummary(r)
 
+			// Verdict wording matches the operator/plugin: the score is a health gauge, the verdict
+			// is the go/no-go. CRITICAL = blocked, WARNING = not recommended (not blocked), SAFE = allowed.
 			switch level {
 			case "CRITICAL":
-				fmt.Println("❌ CRITICAL — Do not upgrade")
+				fmt.Println("❌ Upgrade blocked")
 				for _, b := range blockers {
 					fmt.Printf("   • %s\n", b)
 				}
 			case "WARNING":
-				fmt.Println("⚠️  WARNING — Upgrade possible but issues detected")
+				fmt.Println("⚠️  Not recommended — issues detected, but not blocked")
+				if r.Reason != "" {
+					fmt.Printf("   • %s\n", r.Reason)
+				}
 			default:
-				fmt.Println("✔ SAFE — Cluster ready, upgrade recommended")
+				fmt.Println("✔ Upgrade allowed — cluster is ready")
 			}
 		}
 
