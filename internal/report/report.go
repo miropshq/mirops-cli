@@ -53,9 +53,87 @@ type Report struct {
 	AIReasoning    string   `json:"aiReasoning,omitempty"` // AI explanation; empty if AI off/failed
 
 	// Logical mirror of the cluster (additive, absent on older operators).
-	Addons []AddonCompatibility `json:"addons,omitempty"`
-	Graph  *Graph               `json:"graph,omitempty"`
-	Risk   *RiskBreakdown       `json:"risk,omitempty"`
+	Workloads Workloads            `json:"workloads"`
+	Addons    []AddonCompatibility `json:"addons,omitempty"`
+	Graph     *Graph               `json:"graph,omitempty"`
+	Risk      *RiskBreakdown       `json:"risk,omitempty"`
+}
+
+// Workloads is the operator's raw cluster inventory, grouped by kind. Empty slices
+// on older operators that don't emit a section — every renderer skips empties.
+type Workloads struct {
+	Nodes          []NodeReport          `json:"nodes"`
+	Deployments    []WorkloadReport      `json:"deployments"`
+	StatefulSets   []WorkloadReport      `json:"statefulsets"`
+	DaemonSets     []DaemonSetReport     `json:"daemonsets"`
+	Jobs           []JobReport           `json:"jobs"`
+	PDBs           []PDBReport           `json:"pdbs,omitempty"`
+	PVCs           []PVCReport           `json:"pvcs,omitempty"`
+	BarePods       []BarePodReport       `json:"barePods,omitempty"`
+	DeprecatedAPIs []DeprecatedAPIReport `json:"deprecatedApis,omitempty"`
+}
+
+type NodeReport struct {
+	Name       string   `json:"name"`
+	Status     string   `json:"status"`
+	Conditions []string `json:"conditions,omitempty"`
+}
+
+// PodReport is one problem pod under a workload (reason + restart count).
+type PodReport struct {
+	Name     string `json:"name"`
+	Reason   string `json:"reason,omitempty"`
+	Restarts int    `json:"restarts"`
+}
+
+// WorkloadReport covers Deployments and StatefulSets (same shape: ready vs desired).
+type WorkloadReport struct {
+	Namespace       string      `json:"namespace"`
+	Name            string      `json:"name"`
+	ReadyReplicas   int         `json:"readyReplicas"`
+	DesiredReplicas int         `json:"desiredReplicas"`
+	Pods            []PodReport `json:"pods,omitempty"`
+}
+
+type DaemonSetReport struct {
+	Namespace         string      `json:"namespace"`
+	Name              string      `json:"name"`
+	NumberUnavailable int         `json:"numberUnavailable"`
+	Pods              []PodReport `json:"pods,omitempty"`
+}
+
+type JobReport struct {
+	Namespace string      `json:"namespace"`
+	Name      string      `json:"name"`
+	Active    int         `json:"active"`
+	Status    string      `json:"status"`
+	Reason    string      `json:"reason,omitempty"`
+	Pods      []PodReport `json:"pods,omitempty"`
+}
+
+type PDBReport struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
+type PVCReport struct {
+	Namespace    string `json:"namespace"`
+	Name         string `json:"name"`
+	StorageClass string `json:"storageClass,omitempty"`
+	Phase        string `json:"phase"` // Bound | Pending | Lost
+}
+
+type BarePodReport struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Status    string `json:"status"` // Running | Down
+}
+
+type DeprecatedAPIReport struct {
+	Group     string `json:"group"`
+	Version   string `json:"version"`
+	Resource  string `json:"resource"`
+	RemovedIn string `json:"removedIn"`
 }
 
 // AddonCompatibility — one per detected add-on.
