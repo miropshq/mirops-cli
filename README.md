@@ -27,7 +27,7 @@ go build -o bin/mirops .
 Run from source:
 
 ```sh
-go run . scan --source ./report.json
+go run . scan --source ./report.mirops
 ```
 
 ## Usage
@@ -35,37 +35,37 @@ go run . scan --source ./report.json
 Read a local report:
 
 ```sh
-mirops scan --source ./mirops-report.json
+mirops scan --source ./mirops-report.mirops
 ```
 
 Read a file URL:
 
 ```sh
-mirops scan --source file:///tmp/mirops-report.json
+mirops scan --source file:///tmp/mirops-report.mirops
 ```
 
 Read an HTTP report:
 
 ```sh
-mirops scan --source https://example.com/mirops-report.json
+mirops scan --source https://example.com/mirops-report.mirops
 ```
 
 Emit JSON:
 
 ```sh
-mirops scan --source ./mirops-report.json --output json
+mirops scan --source ./mirops-report.mirops --output json
 ```
 
 Fail the pipeline when the upgrade is not allowed (CRITICAL):
 
 ```sh
-mirops scan --source ./mirops-report.json --enforce
+mirops scan --source ./mirops-report.mirops --enforce
 ```
 
 Fail also on WARNING (stricter policy):
 
 ```sh
-mirops scan --source ./mirops-report.json --enforce --enforce-level warning
+mirops scan --source ./mirops-report.mirops --enforce --enforce-level warning
 ```
 
 ## Command Reference
