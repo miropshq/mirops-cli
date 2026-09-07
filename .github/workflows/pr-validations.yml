@@ -54,6 +54,8 @@ jobs:
     name: Cross-build (${{ matrix.suffix }})
     runs-on: ubuntu-latest
     needs: validate
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
     strategy:
       fail-fast: false
       matrix:
@@ -91,3 +93,23 @@ jobs:
           go build -trimpath \
             -ldflags="-s -w -X main.version=pr-${{ github.event.pull_request.number }}" \
             -o dist/mirops-${{ matrix.suffix }}${{ matrix.ext }} .
+
+      - name: Notify Slack
+        if: ${{ always() && env.SLACK_WEBHOOK_URL != '' }}
+        uses: slackapi/slack-github-action@v4.0.0
+        with:
+          webhook: ${{ env.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "${{ github.workflow }} ${{ job.status }} for ${{ github.repository }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*${{ github.workflow }}* — *${{ job.status }}*\n`${{ github.repository }}` · `${{ github.ref_name }}` · `${{ github.sha }}`\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"
+                  }
+                }
+              ]
+            }
