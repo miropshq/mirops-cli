@@ -49,6 +49,36 @@ jobs:
       - name: Test
         run: go test -race -count=1 ./...
 
+  # ─── Preview next release version (dry run — no tag, no release) ────────────────
+  # Runs semantic-release in --dry-run: it computes the version that merging this PR
+  # would publish and prints it, but does NOT create a tag, release, or bump anything.
+  # The result shows in the job summary so you can see the next version before merging.
+  preview-version:
+    name: Preview release version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0            # semantic-release needs full history + tags
+          ref: ${{ github.head_ref }}
+
+      - name: Compute next version (dry run)
+        id: sr
+        uses: cycjimmy/semantic-release-action@v4
+        with:
+          dry_run: true             # never publishes — analysis only
+          branches: ${{ github.head_ref }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Report next version
+        run: |
+          if [ "${{ steps.sr.outputs.new_release_published }}" = "true" ]; then
+            echo "### 🔖 Merging this PR would publish **v${{ steps.sr.outputs.new_release_version }}**" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### 🔖 No release — no releasable commits (docs/chore/etc. only)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   # ─── Cross-compile all release targets ────────────────────────────────────────
   build-matrix:
     name: Cross-build (${{ matrix.suffix }})
