@@ -14,7 +14,59 @@ The CLI is designed to consume reports produced by the `mirops` Kubernetes opera
 - Can enforce the decision by exiting with code `1` when the upgrade is not allowed
 - Supports environment-variable fallbacks for automation
 
+## Install
+
+Download the release binary for your platform, make it executable, and put it on your `PATH`. **No `sudo` required** — this works the same on a laptop or in a CI pipeline.
+
+```sh
+# 1. Download the binary for your platform (see the table below for the name)
+curl -fsSL -O https://github.com/miropshq/mirops-cli/releases/latest/download/mirops-darwin-arm64
+
+# 2. Install it on a user-writable dir on your PATH
+mkdir -p "$HOME/.local/bin"
+cp mirops-darwin-arm64 "$HOME/.local/bin/mirops"
+chmod +x "$HOME/.local/bin/mirops"
+
+# 3. Ensure the dir is on your PATH (add to your shell rc to persist)
+export PATH="$HOME/.local/bin:$PATH"
+
+# 4. Verify
+mirops --version
+```
+
+### Platform binaries
+
+| Platform | Binary |
+| --- | --- |
+| macOS (Apple Silicon) | `mirops-darwin-arm64` |
+| macOS (Intel) | `mirops-darwin-amd64` |
+| Linux (x86_64) | `mirops-linux-amd64` |
+| Linux (arm64) | `mirops-linux-arm64` |
+| Windows (x86_64) | `mirops-windows-amd64.exe` |
+
+Swap the binary name in the `curl` URL for your platform.
+
+### Latest vs. pinned version
+
+```sh
+# Always the newest release
+curl -fsSL -O https://github.com/miropshq/mirops-cli/releases/latest/download/mirops-linux-amd64
+
+# Pin a version (reproducible — recommended for CI)
+curl -fsSL -O https://github.com/miropshq/mirops-cli/releases/download/v0.1.0/mirops-linux-amd64
+```
+
+### Verify the checksum (optional)
+
+```sh
+curl -fsSL -O https://github.com/miropshq/mirops-cli/releases/latest/download/checksums.txt
+shasum -a 256 --check --ignore-missing checksums.txt   # macOS
+sha256sum --check --ignore-missing checksums.txt        # Linux
+```
+
 ## Requirements
+
+Building from source (not needed to install a release binary):
 
 - Go 1.26.2 or newer
 
