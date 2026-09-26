@@ -10,7 +10,7 @@ import (
 )
 
 // envPrefix makes every flag of every command settable from the environment, so a pipeline is
-// configured once through variables: --target-version ↔ MIROPS_TARGET_VERSION, -n/--namespace ↔
+// configured once through variables: --upgrade-source ↔ MIROPS_UPGRADE_SOURCE, -n/--namespace ↔
 // MIROPS_NAMESPACE. Precedence is flag > environment > default.
 const envPrefix = "MIROPS_"
 
