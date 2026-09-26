@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -15,6 +14,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// scanSchemaVersion versions the --output json shape. Bump it only for a breaking change; adding an
+// optional field doesn't need a bump.
+const scanSchemaVersion = 1
+
 var (
 	source        string
 	apiURL        string
@@ -22,7 +25,10 @@ var (
 	cluster       string
 	enforce       bool
 	enforceLevel  string
-	targetVersion string
+	upgradeSource string
+	checkUpgrade  bool
+	file          string
+	namespaces    []string
 	output        string
 	timeout       time.Duration
 	retry         int
@@ -35,208 +41,390 @@ func isSaaSMode(cmd *cobra.Command) bool {
 
 var scanCmd = &cobra.Command{
 	Use:   "scan",
-	Short: "Evaluate upgrade risk and gate pipeline",
-	Long: `Evaluate Kubernetes upgrade risk.
+	Short: "Gate a pipeline on the live cluster mirror",
+	Long: `Evaluate a change against the live cluster mirror. The inputs you give pick the checks:
 
-OSS mode  — provide --source pointing to a local file, S3, Azure Blob, or HTTP URL.
-SaaS mode — provide --api-url, --api-token, and --cluster to fetch the report from
-            the Mirops backend (requires a paid subscription).`,
+  --upgrade / MIROPS_UPGRADE=true    upgrade check, off by default. Gates on the UpgradeAnalysis report at
+                                     --upgrade-source / MIROPS_UPGRADE_SOURCE; the target version comes from
+                                     that report, and the check skips itself once the cluster runs it.
+  -n / --namespace / MIROPS_NAMESPACE  the state of one namespace, a comma-separated list, or "all"
+                                     (informational, never blocks).
+  -f / --file / MIROPS_FILE          deploy check of the manifests you apply (mirops v0.3.0).
+
+Point --source (MIROPS_SOURCE) at the ClusterMirror report (<name>.mirror). Pointing it at an
+UpgradeAnalysis report (<name>.mirops) gates on that analysis directly. Every flag can be set as
+MIROPS_<FLAG>.
+
+Exit codes: 0 passed or nothing to check · 1 blocked (with --enforce) · 2 couldn't evaluate.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		// Resolve env var fallbacks
-		if source == "" {
-			source = os.Getenv("MIROPS_SOURCE")
-		}
+		os.Exit(runScan(cmd))
+	},
+}
+
+// scanOutput is the --output json document: one block per check that ran.
+type scanOutput struct {
+	SchemaVersion int         `json:"schemaVersion"`
+	Source        string      `json:"source"`
+	Mirror        *mirrorInfo `json:"mirror,omitempty"`
+	Checks        scanChecks  `json:"checks"`
+}
+
+type mirrorInfo struct {
+	Name           string               `json:"name"`
+	GeneratedAt    string               `json:"generatedAt"`
+	ClusterVersion string               `json:"clusterVersion"`
+	Summary        report.MirrorSummary `json:"summary"`
+}
+
+type scanChecks struct {
+	// Namespaces lists the requested namespaces; with "all", only those with something at risk.
+	Namespaces []*namespaceCheck `json:"namespaces,omitempty"`
+	// OtherHealthyNamespaces counts the namespaces "all" left out because nothing in them is at risk.
+	OtherHealthyNamespaces int           `json:"otherHealthyNamespaces,omitempty"`
+	Upgrade                *upgradeCheck `json:"upgrade,omitempty"`
+}
+
+// upgradeCheck is the upgrade gate's result. Blocking says whether this verdict fails the pipeline under
+// --enforce at the current --enforce-level, so a JSON consumer doesn't have to re-derive it.
+type upgradeCheck struct {
+	Status         string                      `json:"status"` // evaluated | skipped
+	Message        string                      `json:"message,omitempty"`
+	Source         string                      `json:"source,omitempty"` // where the upgrade report was read
+	Blocking       bool                        `json:"blocking"`
+	Allow          bool                        `json:"allow"`
+	Level          string                      `json:"level,omitempty"`
+	Blockers       []string                    `json:"blockers,omitempty"`
+	Reason         string                      `json:"reason,omitempty"`
+	Cluster        string                      `json:"cluster,omitempty"`
+	ClusterVersion string                      `json:"clusterVersion,omitempty"`
+	TargetVersion  string                      `json:"targetVersion,omitempty"`
+	Score          int                         `json:"score,omitempty"`
+	AI             *report.AIScores            `json:"ai,omitempty"`
+	AIReasoning    string                      `json:"aiReasoning,omitempty"`
+	Issues         []string                    `json:"issues,omitempty"`
+	Addons         []report.AddonCompatibility `json:"addons,omitempty"`
+	Risk           *report.RiskBreakdown       `json:"risk,omitempty"`
+	Graph          *report.Graph               `json:"graph,omitempty"`
+	Workloads      *report.Workloads           `json:"workloads,omitempty"`
+
+	report *report.Report // the full upgrade report, for the table view
+}
+
+// fail reports why the scan couldn't evaluate and returns exit 2 — never a pass.
+func fail(format string, a ...any) int {
+	fmt.Fprintf(os.Stderr, "Error: "+format+"\n", a...)
+	return exitCannotEvaluate
+}
+
+func runScan(cmd *cobra.Command) int {
+	if isSaaSMode(cmd) {
+		// SaaS mode: all three SaaS flags are required
+		missing := []string{}
 		if apiURL == "" {
-			apiURL = os.Getenv("MIROPS_API_URL")
+			missing = append(missing, "--api-url (env: MIROPS_API_URL)")
 		}
 		if apiToken == "" {
-			apiToken = os.Getenv("MIROPS_API_TOKEN")
+			missing = append(missing, "--api-token (env: MIROPS_API_TOKEN)")
 		}
 		if cluster == "" {
-			cluster = os.Getenv("MIROPS_CLUSTER")
+			missing = append(missing, "--cluster (env: MIROPS_CLUSTER)")
 		}
-		if !cmd.Flags().Changed("enforce") {
-			enforce = os.Getenv("MIROPS_ENFORCE") == "true"
+		for _, m := range missing {
+			fmt.Fprintf(os.Stderr, "Error: SaaS mode requires %s\n", m)
 		}
-		if !cmd.Flags().Changed("enforce-level") {
-			if v := os.Getenv("MIROPS_ENFORCE_LEVEL"); v != "" {
-				enforceLevel = v
-			}
+		if len(missing) > 0 {
+			return exitCannotEvaluate
 		}
-		if targetVersion == "" {
-			targetVersion = os.Getenv("MIROPS_TARGET_VERSION")
-		}
-		if !cmd.Flags().Changed("output") {
-			if v := os.Getenv("MIROPS_OUTPUT"); v != "" {
-				output = v
-			}
-		}
-		if !cmd.Flags().Changed("timeout") {
-			if v := os.Getenv("MIROPS_TIMEOUT"); v != "" {
-				if d, err := time.ParseDuration(v); err == nil {
-					timeout = d
-				}
-			}
-		}
-		if !cmd.Flags().Changed("retry") {
-			if v := os.Getenv("MIROPS_RETRY"); v != "" {
-				if n, err := strconv.Atoi(v); err == nil {
-					retry = n
-				}
-			}
-		}
+		// TODO: fetch report from Mirops backend using apiURL, apiToken, cluster
+		return fail("SaaS mode not yet implemented")
+	}
 
-		if isSaaSMode(cmd) {
-			// SaaS mode: all three SaaS flags are required
-			missing := []string{}
-			if apiURL == "" {
-				missing = append(missing, "--api-url (env: MIROPS_API_URL)")
-			}
-			if apiToken == "" {
-				missing = append(missing, "--api-token (env: MIROPS_API_TOKEN)")
-			}
-			if cluster == "" {
-				missing = append(missing, "--cluster (env: MIROPS_CLUSTER)")
-			}
-			if len(missing) > 0 {
-				for _, m := range missing {
-					fmt.Fprintf(os.Stderr, "Error: SaaS mode requires %s\n", m)
-				}
-				os.Exit(2)
-			}
-			// TODO: fetch report from Mirops backend using apiURL, apiToken, cluster
-			fmt.Fprintln(os.Stderr, "Error: SaaS mode not yet implemented")
-			os.Exit(2)
-		}
+	if output != "table" && output != "json" {
+		return fail("--output must be table or json, got %q", output)
+	}
+	if lvl := strings.ToLower(enforceLevel); lvl != "critical" && lvl != "warning" {
+		return fail("--enforce-level must be critical or warning, got %q", enforceLevel)
+	}
+	if source == "" {
+		return fail("--source is required (or set MIROPS_SOURCE) — point it at the ClusterMirror report, e.g. s3://…/default.mirror")
+	}
+	if file != "" {
+		return fail("deploy checks (--file / MIROPS_FILE) arrive in mirops v0.3.0; this version checks upgrades " +
+			"(MIROPS_UPGRADE) and shows namespaces' state (MIROPS_NAMESPACE)")
+	}
+	if upgradeSource != "" && !checkUpgrade {
+		fmt.Fprintln(os.Stderr, "Warning: MIROPS_UPGRADE_SOURCE is set but MIROPS_UPGRADE isn't — the upgrade check didn't run")
+	}
 
-		// OSS mode: --source is required
-		if source == "" {
-			fmt.Fprintln(os.Stderr, "Error: --source is required in OSS mode (or set MIROPS_SOURCE)")
-			os.Exit(2)
-		}
+	provider, err := providers.Validate(source)
+	if err != nil {
+		return fail("%v", err)
+	}
+	data, err := provider.Fetch(source)
+	if err != nil {
+		return fail("fetching source: %v", err)
+	}
+	kind, err := peekKind(source, data)
+	if err != nil {
+		return fail("%v", err)
+	}
 
-		provider, err := providers.Validate(source)
+	out := scanOutput{SchemaVersion: scanSchemaVersion, Source: source}
+	switch kind {
+	case "", report.KindUpgradeAnalysis:
+		// An upgrade report handed in directly (or from an operator before 0.2.0): pointing at an upgrade
+		// report is itself the request, so it's gated on as is, switch or not.
+		if len(namespaces) > 0 {
+			return fail("--namespace needs the ClusterMirror report as --source; %s is an UpgradeAnalysis report", source)
+		}
+		if upgradeSource != "" {
+			return fail("--source is already an UpgradeAnalysis report (%s); --upgrade-source goes with the ClusterMirror "+
+				"report as --source", source)
+		}
+		r, err := parseUpgradeReport(source, data)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(2)
+			return fail("%v", err)
+		}
+		out.Checks.Upgrade = evaluateUpgrade(r, source)
+
+	case report.KindClusterMirror:
+		var m report.MirrorReport
+		if err := json.Unmarshal(data, &m); err != nil {
+			return fail("invalid ClusterMirror report in %s: %v", source, err)
+		}
+		out.Mirror = &mirrorInfo{Name: m.Mirror, GeneratedAt: m.GeneratedAt, ClusterVersion: m.ClusterVersion, Summary: m.Summary}
+
+		if !checkUpgrade && len(namespaces) == 0 {
+			return fail("nothing to scan: set MIROPS_UPGRADE=true for the upgrade check, or MIROPS_NAMESPACE for the namespaces' state")
+		}
+		if checkUpgrade && upgradeSource == "" {
+			return fail("MIROPS_UPGRADE=true needs MIROPS_UPGRADE_SOURCE (--upgrade-source) — the URL of the UpgradeAnalysis " +
+				"report, e.g. s3://…/pre-upgrade-1.36.mirops")
+		}
+		if len(namespaces) > 0 {
+			ns, others, err := namespacesStatus(&m, namespaces)
+			if err != nil {
+				return fail("%v", err)
+			}
+			out.Checks.Namespaces, out.Checks.OtherHealthyNamespaces = ns, others
+		}
+		if checkUpgrade {
+			if err := requireUpgradeEnabled(&m); err != nil {
+				return fail("%v", err)
+			}
+			r, err := fetchUpgradeReport(upgradeSource)
+			if err != nil {
+				return fail("%v", err)
+			}
+			// The mirror's cluster version is the fresher one: the analysis may predate an upgrade already done.
+			if upgradePending(r.TargetVersion, m.ClusterVersion) {
+				out.Checks.Upgrade = evaluateUpgrade(r, upgradeSource)
+			} else {
+				out.Checks.Upgrade = &upgradeCheck{Status: "skipped", Source: upgradeSource, Allow: true,
+					Message: fmt.Sprintf("no upgrade pending — the analysis targets %s and the cluster already runs %s",
+						r.TargetVersion, m.ClusterVersion)}
+			}
 		}
 
-		data, err := provider.Fetch(source)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error fetching source: %v\n", err)
-			os.Exit(2)
+	default:
+		return fail("%s is a %q report, which mirops scan doesn't read", source, kind)
+	}
+
+	if output == "json" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(out); err != nil {
+			return fail("writing JSON: %v", err)
 		}
+	} else {
+		renderScan(out)
+	}
 
-		var r report.Report
-		if err := json.Unmarshal(data, &r); err != nil {
-			fmt.Fprintf(os.Stderr, "Invalid JSON: %v\n", err)
-			os.Exit(2)
-		}
+	// Only the upgrade verdict gates; a namespace's state is information.
+	if enforce && out.Checks.Upgrade != nil && out.Checks.Upgrade.Blocking {
+		return exitBlocked
+	}
+	return exitOK
+}
 
-		// Trust the operator's decision — gate and level come from the report.
-		allow, level, blockers := r.Analyze()
+func parseUpgradeReport(source string, data []byte) (*report.Report, error) {
+	var r report.Report
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, fmt.Errorf("invalid UpgradeAnalysis report from %s: %w", source, err)
+	}
+	return &r, nil
+}
 
-		switch output {
-		case "json":
-			result := map[string]interface{}{
-				"cluster":        r.Cluster,
-				"clusterVersion": r.ClusterVersion,
-				"targetVersion":  r.TargetVersion,
-				"riskScore":      r.Scores.Total,
-				"level":          level,
-				"allow":          allow,
-				"blockers":       blockers,
-				"reason":         r.Reason,
-				"issues":         r.Issues,
-			}
-			// Emit AI scoring metadata only when AI actually ran.
-			if r.Scores.AI.Ran() {
-				result["ai"] = r.Scores.AI
-			}
-			if r.AIReasoning != "" {
-				result["aiReasoning"] = r.AIReasoning
-			}
-			// Emit the logical-mirror sections for other tools (omit when absent).
-			if len(r.Addons) > 0 {
-				result["addons"] = r.Addons
-			}
-			if r.Risk != nil {
-				result["risk"] = r.Risk
-			}
-			if r.Graph != nil {
-				result["graph"] = r.Graph
-			}
-			// Full workload inventory, so a downstream tool gets the same detail as the table view.
-			result["workloads"] = r.Workloads
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			enc.Encode(result)
-		default:
-			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, boldc("MIROPS UPGRADE ANALYSIS"))
-			fmt.Fprintln(w, dim("─────────────────────────────────────"))
-			fmt.Fprintf(w, "Cluster:\t%s\n", r.Cluster)
-			fmt.Fprintf(w, "Upgrade:\t%s\n", boldc(r.ClusterVersion+"  →  "+r.TargetVersion))
-			fmt.Fprintln(w, dim("─────────────────────────────────────"))
-			fmt.Fprintf(w, "Score Total:\t%s\n", scoreColor(r.Scores.Total))
-			if b := r.Scores.Base; b != nil {
-				fmt.Fprintf(w, "  Health:\t%d\n", b.Health)
-				fmt.Fprintf(w, "  Capacity:\t%d\n", b.Capacity)
-				fmt.Fprintf(w, "  Stability:\t%d\n", b.Stability)
-				fmt.Fprintf(w, "  Compatibility:\t%d\n", b.Compatibility)
-			}
-			if ai := r.Scores.AI; ai.Ran() {
-				line := fmt.Sprintf("  AI (%s):\t%d", ai.Weight, ai.Score)
-				if ai.Model != "" {
-					line += fmt.Sprintf("  [%s]", ai.Model)
-				}
-				fmt.Fprintln(w, line)
-			}
-			fmt.Fprintln(w, "─────────────────────────────────────")
-			fmt.Fprintf(w, "Reason:\t%s\n", r.Reason)
-			if r.AIReasoning != "" {
-				fmt.Fprintf(w, "AI Reasoning:\t%s\n", r.AIReasoning)
-			}
-			if len(r.Issues) > 0 {
-				fmt.Fprintln(w, "Issues:")
-				for _, issue := range r.Issues {
-					fmt.Fprintf(w, "  · %s\n", issue)
-				}
-			}
-			w.Flush()
+// evaluateUpgrade turns the operator's verdict into the upgrade check. The gate and level come from the
+// report verbatim — the operator's deterministic facts, never the score.
+func evaluateUpgrade(r *report.Report, src string) *upgradeCheck {
+	allow, level, blockers := r.Analyze()
+	c := &upgradeCheck{
+		Status:         "evaluated",
+		Source:         src,
+		Blocking:       !allow || report.Severity(level) >= report.Severity(enforceLevel),
+		Allow:          allow,
+		Level:          level,
+		Blockers:       blockers,
+		Reason:         r.Reason,
+		Cluster:        r.Cluster,
+		ClusterVersion: r.ClusterVersion,
+		TargetVersion:  r.TargetVersion,
+		Score:          r.Scores.Total,
+		AIReasoning:    r.AIReasoning,
+		Issues:         r.Issues,
+		Addons:         r.Addons,
+		Risk:           r.Risk,
+		Graph:          r.Graph,
+		Workloads:      &r.Workloads,
+		report:         r,
+	}
+	// Emit AI scoring metadata only when AI actually ran.
+	if r.Scores.AI.Ran() {
+		c.AI = r.Scores.AI
+	}
+	return c
+}
 
-			renderAddons(r.Addons)
-			renderNamespaceRisk(r.Risk)
-			renderWorkloads(r.Workloads)
-			renderMirrorSummary(r)
-
-			// Verdict wording matches the operator/plugin: the score is a health gauge, the verdict
-			// is the go/no-go. CRITICAL = blocked, WARNING = not recommended (not blocked), SAFE = allowed.
-			// It is printed last, after the full inventory, as the gate the whole report builds up to.
+// renderScan prints the table view: the mirror header, then each check that ran.
+func renderScan(out scanOutput) {
+	if m := out.Mirror; m != nil {
+		fmt.Printf("%s  mirror %s · cluster %s · rebuilt %s\n", boldc("MIROPS"), m.Name, m.ClusterVersion, m.GeneratedAt)
+		fmt.Printf("Cluster now: %d component(s) at risk in %d of %d namespaces\n",
+			m.Summary.AtRisk, m.Summary.NamespacesAtRisk, m.Summary.Namespaces)
+	}
+	if len(out.Checks.Namespaces) > 0 || out.Checks.OtherHealthyNamespaces > 0 {
+		renderNamespaces(out.Checks.Namespaces, out.Checks.OtherHealthyNamespaces)
+	}
+	if up := out.Checks.Upgrade; up != nil {
+		if up.Status == "skipped" {
 			fmt.Println()
-			fmt.Println(dim("═══════════════════ VERDICT ═══════════════════"))
-			switch level {
-			case "CRITICAL":
-				fmt.Println(red("❌ Upgrade blocked"))
-				for _, b := range blockers {
-					fmt.Printf("   %s %s\n", red("•"), b)
-				}
-			case "WARNING":
-				fmt.Println(yellow("⚠️  Not recommended — issues detected, but not blocked"))
-				if r.Reason != "" {
-					fmt.Printf("   %s %s\n", yellow("•"), r.Reason)
-				}
-			default:
-				fmt.Println(green("✔ Upgrade allowed — cluster is ready"))
-			}
+			fmt.Println(boldc("UPGRADE"))
+			fmt.Printf("  %s %s\n", green("✔"), up.Message)
+		} else {
+			renderUpgrade(up)
 		}
+	}
+}
 
-		// Gate the pipeline. Default: fail only when the upgrade is not allowed
-		// (CRITICAL). --enforce-level=warning is stricter (also fails on WARNING).
-		if enforce && (!allow || report.Severity(level) >= report.Severity(enforceLevel)) {
-			os.Exit(1)
+// renderNamespaces prints the requested namespaces' current state. Always informational: it never gates.
+// Healthy namespaces take one line each; with "all" they're left out and counted instead.
+func renderNamespaces(list []*namespaceCheck, otherHealthy int) {
+	atRisk := 0
+	for _, ns := range list {
+		if ns.AtRisk > 0 {
+			atRisk++
 		}
-	},
+	}
+	fmt.Println()
+	fmt.Printf("%s %s\n", boldc(fmt.Sprintf("NAMESPACES — %d of %d with components at risk", atRisk, len(list)+otherHealthy)),
+		dim("(informational, never blocks)"))
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	for _, ns := range list {
+		if ns.AtRisk == 0 {
+			fmt.Fprintf(w, "  %s %s — nothing at risk\n", green("✔"), ns.Namespace)
+			continue
+		}
+		fmt.Fprintf(w, "  %s\t%d of %d at risk\t\t%s\n", boldc(ns.Namespace), ns.AtRisk, ns.Components, riskLabel(ns.Risk))
+		for _, c := range ns.AtRiskComponents {
+			st := c.Status
+			if c.InheritedFrom != "" {
+				st += " (inherits from " + c.InheritedFrom + ")"
+			}
+			fmt.Fprintf(w, "    %s/%s\t%s\t%s\t%s\n", strings.ToLower(c.Kind), c.Name, st, dependsLabel(len(c.Dependents)), riskLabel(c.Risk))
+		}
+	}
+	if otherHealthy > 0 {
+		fmt.Fprintf(w, "  %s %d other namespace(s) with nothing at risk\n", green("✔"), otherHealthy)
+	}
+	w.Flush()
+}
+
+func dependsLabel(n int) string {
+	switch n {
+	case 0:
+		return "nothing depends on it"
+	case 1:
+		return "→ 1 depends on it"
+	default:
+		return fmt.Sprintf("→ %d depend on it", n)
+	}
+}
+
+// riskLabel renders a 0–100 risk as its severity, colored; it is always a row's last cell.
+func riskLabel(risk int) string {
+	l := fmt.Sprintf("%s (%d)", report.RiskSeverity(risk), risk)
+	switch {
+	case risk >= 70:
+		return red(l)
+	case risk >= 40:
+		return yellow(l)
+	default:
+		return green(l)
+	}
+}
+
+// renderUpgrade prints the upgrade analysis and its verdict — the go/no-go the rest builds up to.
+func renderUpgrade(up *upgradeCheck) {
+	r := up.report
+	fmt.Println()
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, boldc("MIROPS UPGRADE ANALYSIS"))
+	fmt.Fprintln(w, dim("─────────────────────────────────────"))
+	fmt.Fprintf(w, "Cluster:\t%s\n", r.Cluster)
+	fmt.Fprintf(w, "Upgrade:\t%s\n", boldc(r.ClusterVersion+"  →  "+r.TargetVersion))
+	fmt.Fprintf(w, "Report:\t%s\n", up.Source)
+	fmt.Fprintln(w, dim("─────────────────────────────────────"))
+	fmt.Fprintf(w, "Score Total:\t%s\n", scoreColor(r.Scores.Total))
+	if b := r.Scores.Base; b != nil {
+		fmt.Fprintf(w, "  Health:\t%d\n", b.Health)
+		fmt.Fprintf(w, "  Capacity:\t%d\n", b.Capacity)
+		fmt.Fprintf(w, "  Stability:\t%d\n", b.Stability)
+		fmt.Fprintf(w, "  Compatibility:\t%d\n", b.Compatibility)
+	}
+	if ai := r.Scores.AI; ai.Ran() {
+		line := fmt.Sprintf("  AI (%s):\t%d", ai.Weight, ai.Score)
+		if ai.Model != "" {
+			line += fmt.Sprintf("  [%s]", ai.Model)
+		}
+		fmt.Fprintln(w, line)
+	}
+	fmt.Fprintln(w, "─────────────────────────────────────")
+	fmt.Fprintf(w, "Reason:\t%s\n", r.Reason)
+	if r.AIReasoning != "" {
+		fmt.Fprintf(w, "AI Reasoning:\t%s\n", r.AIReasoning)
+	}
+	if len(r.Issues) > 0 {
+		fmt.Fprintln(w, "Issues:")
+		for _, issue := range r.Issues {
+			fmt.Fprintf(w, "  · %s\n", issue)
+		}
+	}
+	w.Flush()
+
+	renderAddons(r.Addons)
+	renderNamespaceRisk(r.Risk)
+	renderWorkloads(r.Workloads)
+	renderMirrorSummary(*r)
+
+	// Verdict wording matches the operator/plugin: the score is a health gauge, the verdict
+	// is the go/no-go. CRITICAL = blocked, WARNING = not recommended (not blocked), SAFE = allowed.
+	fmt.Println()
+	fmt.Println(dim("═══════════════════ VERDICT ═══════════════════"))
+	switch up.Level {
+	case "CRITICAL":
+		fmt.Println(red("❌ Upgrade blocked"))
+		for _, b := range up.Blockers {
+			fmt.Printf("   %s %s\n", red("•"), b)
+		}
+	case "WARNING":
+		fmt.Println(yellow("⚠️  Not recommended — issues detected, but not blocked"))
+		if r.Reason != "" {
+			fmt.Printf("   %s %s\n", yellow("•"), r.Reason)
+		}
+	default:
+		fmt.Println(green("✔ Upgrade allowed — cluster is ready"))
+	}
 }
 
 // renderAddons prints the add-on compatibility table. Skips when there are none.
@@ -580,9 +768,12 @@ func init() {
 	scanCmd.Flags().StringVar(&cluster, "cluster", "", "[SaaS] Cluster identifier (env: MIROPS_CLUSTER)")
 
 	// Common flags
-	scanCmd.Flags().BoolVar(&enforce, "enforce", false, "Fail the pipeline based on the operator's decision (env: MIROPS_ENFORCE)")
+	scanCmd.Flags().BoolVar(&enforce, "enforce", false, "Exit 1 when a check blocks (env: MIROPS_ENFORCE)")
 	scanCmd.Flags().StringVar(&enforceLevel, "enforce-level", "critical", "Minimum level that fails --enforce: critical | warning (env: MIROPS_ENFORCE_LEVEL)")
-	scanCmd.Flags().StringVar(&targetVersion, "target-version", "", "Expected target version to validate (env: MIROPS_TARGET_VERSION)")
+	scanCmd.Flags().BoolVar(&checkUpgrade, "upgrade", false, "Run the upgrade check against the report at --upgrade-source (env: MIROPS_UPGRADE)")
+	scanCmd.Flags().StringVar(&upgradeSource, "upgrade-source", "", "UpgradeAnalysis report to gate on: path, file://, s3://, azure://, http:// (env: MIROPS_UPGRADE_SOURCE)")
+	scanCmd.Flags().StringSliceVarP(&namespaces, "namespace", "n", nil, "Namespaces to show the state of: one, a comma-separated list, or \"all\" (env: MIROPS_NAMESPACE)")
+	scanCmd.Flags().StringVarP(&file, "file", "f", "", "Manifests to check before deploying — arrives in v0.3.0 (env: MIROPS_FILE)")
 	scanCmd.Flags().StringVar(&output, "output", "table", "Output format: table, json (env: MIROPS_OUTPUT)")
 	scanCmd.Flags().DurationVar(&timeout, "timeout", 30*time.Second, "Request timeout (env: MIROPS_TIMEOUT)")
 	scanCmd.Flags().IntVar(&retry, "retry", 3, "Number of retries on failure (env: MIROPS_RETRY)")
