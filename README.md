@@ -1,6 +1,6 @@
 # Mirops CLI
 
-`mirops-cli` reads a Mirops upgrade-analysis report and turns it into a command-line decision for humans and CI/CD pipelines. It can print a table, emit JSON, and optionally exit with a non-zero status when the report blocks an upgrade.
+`mirops-cli` gates CI/CD pipelines on the live cluster mirror published by the `mirops` operator. One command, `mirops scan`, runs the checks its inputs ask for — an upgrade check, a namespace's current state and, from v0.3.0, a deploy check of the manifests you're about to apply. Pipelines are configured only through `MIROPS_*` environment variables, so they don't change when an upgrade window opens or closes.
 
 The CLI is designed to consume reports produced by the `mirops` Kubernetes operator.
 
@@ -9,10 +9,13 @@ The CLI is designed to consume reports produced by the `mirops` Kubernetes opera
 - Reads reports from local files and `file://` sources
 - Supports `http://` and `https://` report URLs
 - Supports `s3://` and `azure://` report sources through provider implementations
+- One command, `mirops scan`: the inputs you give pick the checks
+- Upgrade check switched on with `MIROPS_UPGRADE`, reading the UpgradeAnalysis report at `MIROPS_UPGRADE_SOURCE` — the target version comes from that report, and the check skips itself once the cluster runs it
+- Namespaces' current state from the mirror: one, a list, or `all` (informational)
 - Renders the operator's upgrade decision (`SAFE` / `WARNING` / `CRITICAL`)
-- Prints table or JSON output
-- Can enforce the decision by exiting with code `1` when the upgrade is not allowed
-- Supports environment-variable fallbacks for automation
+- Prints a table, or JSON with a `schemaVersion` for other tools
+- Every flag can be set as a `MIROPS_*` environment variable
+- Fixed exit codes: `0` pass, `1` blocked (with `--enforce`), `2` couldn't evaluate — never a silent pass
 
 ## Install
 
@@ -53,7 +56,7 @@ Swap the binary name in the `curl` URL for your platform.
 curl -fsSL -O https://github.com/miropshq/mirops-cli/releases/latest/download/mirops-linux-amd64
 
 # Pin a version (reproducible — recommended for CI)
-curl -fsSL -O https://github.com/miropshq/mirops-cli/releases/download/v0.1.0/mirops-linux-amd64
+curl -fsSL -O https://github.com/miropshq/mirops-cli/releases/download/v0.2.0/mirops-linux-amd64
 ```
 
 ### Verify the checksum (optional)
@@ -84,41 +87,42 @@ go run . scan --source ./report.mirops
 
 ## Usage
 
-Read a local report:
+Point `MIROPS_SOURCE` at the ClusterMirror report (`<name>.mirror`, e.g. `s3://mirops-reports/prod/default.mirror`), then give `mirops scan` the inputs for the checks you want:
 
-```sh
-mirops scan --source ./mirops-report.mirops
+| Input | Check | Gates? |
+| ----- | ----- | ------ |
+| `--upgrade` / `MIROPS_UPGRADE=true` | **Upgrade.** Off by default. Gates on the UpgradeAnalysis report you point `--upgrade-source` / `MIROPS_UPGRADE_SOURCE` at; the target version comes from that report. The cluster already runs it → nothing to check (exit `0`). No `MIROPS_UPGRADE_SOURCE`, an unreadable report, or upgrade analysis off in the cluster → exit `2`. | Yes |
+| `-n` / `--namespace` / `MIROPS_NAMESPACE` | **Namespaces' state**: one namespace, a comma-separated list, or `all` (only the namespaces with something at risk, plus a count of the healthy ones). Reads the mirror report, so it adds no load on the cluster. | Never |
+| `-f` / `--file` / `MIROPS_FILE` | **Deploy** check of the manifests you're about to apply — arrives in v0.3.0. | Yes |
+
+Give several and they all run: the namespaces' state first, the upgrade verdict last — only the verdict sets the exit code. Give none and the CLI exits `2` ("nothing to scan").
+
+### Cluster upgrade pipeline
+
+```yaml
+env:
+  MIROPS_SOURCE: s3://mirops-reports/prod/default.mirror
+  MIROPS_UPGRADE: ${{ vars.MIROPS_UPGRADE }}   # "true" during the upgrade window, e.g. as a CI variable
+  MIROPS_UPGRADE_SOURCE: s3://mirops-reports/prod/to-1-35.mirops
+  MIROPS_ENFORCE: "true"
+steps:
+  - run: mirops scan
+  - run: terraform apply
 ```
 
-Read a file URL:
+Upgrade analysis itself is switched on in the mirops install (Helm `upgrade.enabled=true`), which is where the UpgradeAnalysis — and so the target version — comes from. `MIROPS_UPGRADE` only tells this pipeline to gate on it, and `MIROPS_UPGRADE_SOURCE` says where its report is. Each source is read with the pipeline's own credentials for its scheme (AWS for `s3://`, Azure for `azure://`), so the two reports can live in different places. Once the cluster runs the target version the check reports `skipped` and passes, so the variables can stay set between upgrades.
+
+### Namespaces' state
 
 ```sh
-mirops scan --source file:///tmp/mirops-report.mirops
+mirops scan -n payments
+mirops scan -n payments,checkout,orders
+mirops scan -n all
 ```
 
-Read an HTTP report:
+### Pointing at an analysis directly
 
-```sh
-mirops scan --source https://example.com/mirops-report.mirops
-```
-
-Emit JSON:
-
-```sh
-mirops scan --source ./mirops-report.mirops --output json
-```
-
-Fail the pipeline when the upgrade is not allowed (CRITICAL):
-
-```sh
-mirops scan --source ./mirops-report.mirops --enforce
-```
-
-Fail also on WARNING (stricter policy):
-
-```sh
-mirops scan --source ./mirops-report.mirops --enforce --enforce-level warning
-```
+`--source` can also be an UpgradeAnalysis report (`<name>.mirops`), as with v0.1.0 — pointing at it is the request, so the CLI gates on it as is (then `--upgrade-source` and `--namespace` don't apply).
 
 ## Command Reference
 
@@ -126,13 +130,18 @@ mirops scan --source ./mirops-report.mirops --enforce --enforce-level warning
 mirops scan [flags]
 ```
 
+Every flag can be set through the environment as `MIROPS_<FLAG>` (dashes become underscores). Precedence: flag, then environment, then default. A variable that doesn't parse stops the CLI with exit `2`.
+
 | Flag | Environment variable | Description |
 | ---- | -------------------- | ----------- |
-| `--source` | `MIROPS_SOURCE` | Report source: path, `file://`, `s3://`, `azure://`, `http://`, or `https://` |
-| `--enforce` | `MIROPS_ENFORCE` | Exit with code `1` based on the report's decision |
-| `--enforce-level` | `MIROPS_ENFORCE_LEVEL` | Minimum level that fails `--enforce`: `critical` (default) or `warning` |
-| `--target-version` | `MIROPS_TARGET_VERSION` | Expected target version |
-| `--output` | `MIROPS_OUTPUT` | Output format: `table` or `json` |
+| `--source` | `MIROPS_SOURCE` | ClusterMirror report: path, `file://`, `s3://`, `azure://`, `http://`, or `https://` |
+| `--upgrade` | `MIROPS_UPGRADE` | Run the upgrade check against the report at `--upgrade-source` |
+| `--upgrade-source` | `MIROPS_UPGRADE_SOURCE` | UpgradeAnalysis report to gate on: path, `file://`, `s3://`, `azure://`, `http://`, or `https://` |
+| `-n`, `--namespace` | `MIROPS_NAMESPACE` | Namespaces to show the state of: one, a comma-separated list, or `all` |
+| `-f`, `--file` | `MIROPS_FILE` | Manifests to check before deploying (v0.3.0) |
+| `--enforce` | `MIROPS_ENFORCE` | Exit `1` when a check blocks |
+| `--enforce-level` | `MIROPS_ENFORCE_LEVEL` | Minimum upgrade level that blocks: `critical` (default) or `warning` |
+| `--output` | `MIROPS_OUTPUT` | `table` or `json` |
 | `--timeout` | `MIROPS_TIMEOUT` | Request timeout duration |
 | `--retry` | `MIROPS_RETRY` | Number of retries on failure |
 
@@ -144,9 +153,21 @@ SaaS-related flags are present but not implemented yet:
 | `--api-token` | `MIROPS_API_TOKEN` |
 | `--cluster` | `MIROPS_CLUSTER` |
 
+### Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| `0` | Passed, or nothing to check on purpose (no upgrade pending) |
+| `1` | A check blocked, and `--enforce` is set |
+| `2` | Couldn't evaluate: missing or unreadable source, unknown report kind, bad flag or variable, nothing to scan, `MIROPS_UPGRADE=true` without `MIROPS_UPGRADE_SOURCE`, upgrade check requested while upgrade analysis is off. Never treated as a pass. |
+
+### JSON output
+
+`--output json` prints one document with a `schemaVersion` (currently `1`) and one block per check that ran — `checks.upgrade` (`status`: `evaluated` or `skipped`, `source` — where the upgrade report was read — plus `blocking`, `level`, `blockers`, …) and `checks.namespaces` (a list). New fields may be added without a version bump; breaking changes bump `schemaVersion`.
+
 ## Decision Logic
 
-The decision is computed by the `mirops` operator from deterministic facts (incompatible add-ons, lost PVCs, PDBs, CPU/memory pressure, pods not ready) and reported in `decision`. The CLI renders it verbatim — it does **not** recompute the gate from the score (`scores.total` is a readiness gauge only).
+The upgrade decision is computed by the `mirops` operator from deterministic facts (incompatible add-ons, lost PVCs, PDBs, CPU/memory pressure, pods not ready) and reported in `decision`. The CLI renders it verbatim — it does **not** recompute the gate from the score (`scores.total` is a readiness gauge only).
 
 | Result | Meaning |
 | ------ | ------- |
@@ -154,7 +175,7 @@ The decision is computed by the `mirops` operator from deterministic facts (inco
 | `WARNING` | Upgrade possible but issues were detected |
 | `SAFE` | Cluster ready, upgrade recommended |
 
-With `--enforce`, the CLI exits `1` when the upgrade is not allowed (CRITICAL). `--enforce-level warning` is stricter and also fails on WARNING.
+With `--enforce`, the upgrade check blocks when the upgrade is not allowed (CRITICAL). `--enforce-level warning` is stricter and also blocks on WARNING. A namespace's state never blocks.
 
 ## Development
 
