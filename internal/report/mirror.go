@@ -20,6 +20,8 @@ type MirrorReport struct {
 	Upgrade        MirrorUpgrade  `json:"upgrade"`
 	AtRisk         []AtRiskEntry  `json:"atRisk,omitempty"`
 	Risk           *RiskBreakdown `json:"risk,omitempty"`
+	// Graph is the mirror's dependency graph: the deploy check judges a change against it.
+	Graph *Graph `json:"graph,omitempty"`
 }
 
 // MirrorSummary is the cluster's current state in numbers (informational — it never gates).
