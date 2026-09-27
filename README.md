@@ -1,8 +1,12 @@
 # Mirops CLI
 
-`mirops-cli` gates CI/CD pipelines on the live cluster mirror published by the `mirops` operator. One command, `mirops scan`, runs the checks its inputs ask for — an upgrade check, a namespace's current state and, from v0.3.0, a deploy check of the manifests you're about to apply. Pipelines are configured only through `MIROPS_*` environment variables, so they don't change when an upgrade window opens or closes.
+`mirops-cli` brings the live **Cluster Mirror** into any pipeline. One command, `mirops scan`, reads the mirror report published by the `mirops` operator and runs the checks its inputs ask for:
 
-The CLI is designed to consume reports produced by the `mirops` Kubernetes operator.
+- **A namespace's state** — what is at risk right now, what depends on it, and its risk. Informational: it never blocks.
+- **An upgrade gate** — with `--enforce`, the pipeline fails when the upgrade verdict isn't safe. Leave `--enforce` off and the same run is report-only.
+- **A deploy check** of the manifests or Terraform plan you're about to apply — coming in v0.3.0, as the `impact` stage.
+
+It reads the mirror report, never the cluster, so the pipeline needs no kubeconfig. Pipelines are configured only through `MIROPS_*` environment variables, so they don't change when an upgrade window opens or closes.
 
 ## Features
 
@@ -10,8 +14,9 @@ The CLI is designed to consume reports produced by the `mirops` Kubernetes opera
 - Supports `http://` and `https://` report URLs
 - Supports `s3://` and `azure://` report sources through provider implementations
 - One command, `mirops scan`: the inputs you give pick the checks
+- Namespaces' current state from the mirror: one, a list, or `all` — at-risk components and their dependents (informational)
 - Upgrade check switched on with `MIROPS_UPGRADE`, reading the UpgradeAnalysis report at `MIROPS_UPGRADE_SOURCE` — the target version comes from that report, and the check skips itself once the cluster runs it
-- Namespaces' current state from the mirror: one, a list, or `all` (informational)
+- A gate you control: `--enforce` fails the pipeline on a blocked upgrade (`--enforce-level warning` to be stricter); without it, every run is report-only
 - Renders the operator's upgrade decision (`SAFE` / `WARNING` / `CRITICAL`)
 - Prints a table, or JSON with a `schemaVersion` for other tools
 - Every flag can be set as a `MIROPS_*` environment variable
