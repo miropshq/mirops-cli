@@ -4,7 +4,7 @@
 
 - **A namespace's state** — what is at risk right now, what depends on it, and its risk. Informational: it never blocks.
 - **An upgrade gate** — with `--enforce`, the pipeline fails when the upgrade verdict isn't safe. Leave `--enforce` off and the same run is report-only.
-- **A deploy check** of the manifests or Terraform plan you're about to apply — coming in v0.3.0, as the `impact` stage.
+- **An impact check** of the manifests or Terraform plan you're about to apply — the `impact` stage of your pipeline. With `--enforce` it blocks only on what the change breaks.
 
 It reads the mirror report, never the cluster, so the pipeline needs no kubeconfig. Pipelines are configured only through `MIROPS_*` environment variables, so they don't change when an upgrade window opens or closes.
 
@@ -18,6 +18,7 @@ It reads the mirror report, never the cluster, so the pipeline needs no kubeconf
 - Upgrade check switched on with `MIROPS_UPGRADE`, reading the UpgradeAnalysis report at `MIROPS_UPGRADE_SOURCE` — the target version comes from that report, and the check skips itself once the cluster runs it
 - A gate you control: `--enforce` fails the pipeline on a blocked upgrade (`--enforce-level warning` to be stricter); without it, every run is report-only
 - Renders the operator's upgrade decision (`SAFE` / `WARNING` / `CRITICAL`)
+- Impact check with `-f`: rendered manifests (YAML or JSON, a file, a directory, or stdin) or a Terraform plan, judged against the mirror — never the cluster
 - Prints a table, or JSON with a `schemaVersion` for other tools
 - Every flag can be set as a `MIROPS_*` environment variable
 - Fixed exit codes: `0` pass, `1` blocked (with `--enforce`), `2` couldn't evaluate — never a silent pass
@@ -92,21 +93,21 @@ go run . scan --source ./report.mirops
 
 ## Usage
 
-Point `MIROPS_SOURCE` at the ClusterMirror report (`<name>.mirror`, e.g. `s3://mirops-reports/prod/default.mirror`), then give `mirops scan` the inputs for the checks you want:
+Point `MIROPS_SOURCE` at the ClusterMirror report (`<name>.mirops`, e.g. `s3://mirops-reports/prod/default.mirops`; from the operator's reports service, add `?kind=ClusterMirror`), then give `mirops scan` the inputs for the checks you want:
 
 | Input | Check | Gates? |
 | ----- | ----- | ------ |
 | `--upgrade` / `MIROPS_UPGRADE=true` | **Upgrade.** Off by default. Gates on the UpgradeAnalysis report you point `--upgrade-source` / `MIROPS_UPGRADE_SOURCE` at; the target version comes from that report. The cluster already runs it → nothing to check (exit `0`). No `MIROPS_UPGRADE_SOURCE`, an unreadable report, or upgrade analysis off in the cluster → exit `2`. | Yes |
 | `-n` / `--namespace` / `MIROPS_NAMESPACE` | **Namespaces' state**: one namespace, a comma-separated list, or `all` (only the namespaces with something at risk, plus a count of the healthy ones). Reads the mirror report, so it adds no load on the cluster. | Never |
-| `-f` / `--file` / `MIROPS_FILE` | **Deploy** check of the manifests you're about to apply — arrives in v0.3.0. | Yes |
+| `-f` / `--file` / `MIROPS_FILE` | **Impact** of what you're about to apply: a manifest file, a directory, `-` for stdin, or a Terraform plan (`terraform show -json`). With `-n`, only changes in those namespaces are judged. | Yes |
 
-Give several and they all run: the namespaces' state first, the upgrade verdict last — only the verdict sets the exit code. Give none and the CLI exits `2` ("nothing to scan").
+Give several and they all run: the impact of the change, the namespaces' state, and the upgrade verdict — the impact and the verdict set the exit code. Give none and the CLI exits `2` ("nothing to scan").
 
 ### Cluster upgrade pipeline
 
 ```yaml
 env:
-  MIROPS_SOURCE: s3://mirops-reports/prod/default.mirror
+  MIROPS_SOURCE: s3://mirops-reports/prod/default.mirops
   MIROPS_UPGRADE: ${{ vars.MIROPS_UPGRADE }}   # "true" during the upgrade window, e.g. as a CI variable
   MIROPS_UPGRADE_SOURCE: s3://mirops-reports/prod/to-1-35.mirops
   MIROPS_ENFORCE: "true"
@@ -116,6 +117,31 @@ steps:
 ```
 
 Upgrade analysis itself is switched on in the mirops install (Helm `upgrade.enabled=true`), which is where the UpgradeAnalysis — and so the target version — comes from. `MIROPS_UPGRADE` only tells this pipeline to gate on it, and `MIROPS_UPGRADE_SOURCE` says where its report is. Each source is read with the pipeline's own credentials for its scheme (AWS for `s3://`, Azure for `azure://`), so the two reports can live in different places. Once the cluster runs the target version the check reports `skipped` and passes, so the variables can stay set between upgrades.
+
+### Impact of a change
+
+Run it as the `impact` stage, after the build and before the deploy. It reads what you're about to apply and the mirror report — never the cluster:
+
+```yaml
+env:
+  MIROPS_SOURCE: s3://mirops-reports/prod/default.mirops
+  MIROPS_NAMESPACE: payments        # the namespaces this repo deploys to
+  MIROPS_ENFORCE: "true"
+steps:
+  - run: helm template payments ./chart | mirops scan -f -
+  # or: mirops scan -f k8s/                         (a directory of .yaml / .yml / .json)
+  # or: terraform show -json plan.out | mirops scan -f -
+```
+
+With `--enforce` it blocks (exit `1`) only on what the change breaks:
+
+- deleting a PVC, Service, ConfigMap or Secret that something still uses;
+- mounting a PVC that is `Pending`, `Lost`, or doesn't exist; an Ingress routing to a Service that doesn't exist;
+- depending on something the same change deletes.
+
+What's already broken, and what depends on what the change touches (its blast radius), is shown as information. What the report can't vouch for yet — whether a ConfigMap or Secret exists — is marked `?`.
+
+It reads rendered output only: `values.yaml`, `Chart.yaml`, `kustomization.yaml`, `.tf` files, templates with `{{ }}` and binary plans are refused with the command that renders them (exit `2`). In a directory it reads every `.yaml`, `.yml` and `.json` file and lists what it ignored (other files, empty ones, hidden directories). A `-n` namespace that is neither in the mirror nor in the change exits `2` — most likely a typo. A mirror report older than `--max-mirror-age` (default `1h`) exits `2`.
 
 ### Namespaces' state
 
@@ -143,7 +169,8 @@ Every flag can be set through the environment as `MIROPS_<FLAG>` (dashes become 
 | `--upgrade` | `MIROPS_UPGRADE` | Run the upgrade check against the report at `--upgrade-source` |
 | `--upgrade-source` | `MIROPS_UPGRADE_SOURCE` | UpgradeAnalysis report to gate on: path, `file://`, `s3://`, `azure://`, `http://`, or `https://` |
 | `-n`, `--namespace` | `MIROPS_NAMESPACE` | Namespaces to show the state of: one, a comma-separated list, or `all` |
-| `-f`, `--file` | `MIROPS_FILE` | Manifests to check before deploying (v0.3.0) |
+| `-f`, `--file` | `MIROPS_FILE` | What you're about to apply: a manifest file, a directory, `-` for stdin, or a Terraform plan in JSON |
+| `--max-mirror-age` | `MIROPS_MAX_MIRROR_AGE` | Oldest mirror report `-f` accepts (default `1h`) |
 | `--enforce` | `MIROPS_ENFORCE` | Exit `1` when a check blocks |
 | `--enforce-level` | `MIROPS_ENFORCE_LEVEL` | Minimum upgrade level that blocks: `critical` (default) or `warning` |
 | `--output` | `MIROPS_OUTPUT` | `table` or `json` |

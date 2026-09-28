@@ -9,6 +9,9 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/miropshq/mirops-cli/internal/change"
+	"github.com/miropshq/mirops-cli/internal/impact"
+	"github.com/miropshq/mirops-cli/internal/input"
 	"github.com/miropshq/mirops-cli/internal/providers"
 	"github.com/miropshq/mirops-cli/internal/report"
 	"github.com/spf13/cobra"
@@ -28,6 +31,7 @@ var (
 	upgradeSource string
 	checkUpgrade  bool
 	file          string
+	maxMirrorAge  time.Duration
 	namespaces    []string
 	output        string
 	timeout       time.Duration
@@ -49,13 +53,19 @@ var scanCmd = &cobra.Command{
                                      that report, and the check skips itself once the cluster runs it.
   -n / --namespace / MIROPS_NAMESPACE  the state of one namespace, a comma-separated list, or "all"
                                      (informational, never blocks).
-  -f / --file / MIROPS_FILE          deploy check of the manifests you apply (mirops v0.3.0).
+  -f / --file / MIROPS_FILE          impact check of what you're about to apply: rendered manifests (a file,
+                                     a directory, or - for stdin) or a Terraform plan (terraform show -json).
+                                     Blocks, with --enforce, only on what the change breaks: deleting
+                                     something still in use, or depending on a volume or Service that is
+                                     missing or broken. With -n, only changes in those namespaces are judged.
 
-Point --source (MIROPS_SOURCE) at the ClusterMirror report (<name>.mirror). Pointing it at an
-UpgradeAnalysis report (<name>.mirops) gates on that analysis directly. Every flag can be set as
+Point --source (MIROPS_SOURCE) at the ClusterMirror report (<name>.mirops, kind ClusterMirror; from the
+operator's reports service add ?kind=ClusterMirror). Pointing it at an UpgradeAnalysis report gates on
+that analysis directly. Every flag can be set as
 MIROPS_<FLAG>.
 
 Exit codes: 0 passed or nothing to check · 1 blocked (with --enforce) · 2 couldn't evaluate.`,
+	Args: cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
 		os.Exit(runScan(cmd))
 	},
@@ -82,6 +92,8 @@ type scanChecks struct {
 	// OtherHealthyNamespaces counts the namespaces "all" left out because nothing in them is at risk.
 	OtherHealthyNamespaces int           `json:"otherHealthyNamespaces,omitempty"`
 	Upgrade                *upgradeCheck `json:"upgrade,omitempty"`
+	// Impact is the -f check: what the change would break, judged against the mirror's graph.
+	Impact *impact.Result `json:"impact,omitempty"`
 }
 
 // upgradeCheck is the upgrade gate's result. Blocking says whether this verdict fails the pipeline under
@@ -146,11 +158,7 @@ func runScan(cmd *cobra.Command) int {
 		return fail("--enforce-level must be critical or warning, got %q", enforceLevel)
 	}
 	if source == "" {
-		return fail("--source is required (or set MIROPS_SOURCE) — point it at the ClusterMirror report, e.g. s3://…/default.mirror")
-	}
-	if file != "" {
-		return fail("deploy checks (--file / MIROPS_FILE) arrive in mirops v0.3.0; this version checks upgrades " +
-			"(MIROPS_UPGRADE) and shows namespaces' state (MIROPS_NAMESPACE)")
+		return fail("--source is required (or set MIROPS_SOURCE) — point it at the ClusterMirror report, e.g. s3://…/default.mirops")
 	}
 	if upgradeSource != "" && !checkUpgrade {
 		fmt.Fprintln(os.Stderr, "Warning: MIROPS_UPGRADE_SOURCE is set but MIROPS_UPGRADE isn't — the upgrade check didn't run")
@@ -174,8 +182,8 @@ func runScan(cmd *cobra.Command) int {
 	case "", report.KindUpgradeAnalysis:
 		// An upgrade report handed in directly (or from an operator before 0.2.0): pointing at an upgrade
 		// report is itself the request, so it's gated on as is, switch or not.
-		if len(namespaces) > 0 {
-			return fail("--namespace needs the ClusterMirror report as --source; %s is an UpgradeAnalysis report", source)
+		if len(namespaces) > 0 || file != "" {
+			return fail("--namespace and --file need the ClusterMirror report as --source; %s is an UpgradeAnalysis report", source)
 		}
 		if upgradeSource != "" {
 			return fail("--source is already an UpgradeAnalysis report (%s); --upgrade-source goes with the ClusterMirror "+
@@ -194,15 +202,23 @@ func runScan(cmd *cobra.Command) int {
 		}
 		out.Mirror = &mirrorInfo{Name: m.Mirror, GeneratedAt: m.GeneratedAt, ClusterVersion: m.ClusterVersion, Summary: m.Summary}
 
-		if !checkUpgrade && len(namespaces) == 0 {
-			return fail("nothing to scan: set MIROPS_UPGRADE=true for the upgrade check, or MIROPS_NAMESPACE for the namespaces' state")
+		if !checkUpgrade && len(namespaces) == 0 && file == "" {
+			return fail("nothing to scan: set MIROPS_FILE for the impact of a change, MIROPS_NAMESPACE for the namespaces' " +
+				"state, or MIROPS_UPGRADE=true for the upgrade check")
 		}
 		if checkUpgrade && upgradeSource == "" {
 			return fail("MIROPS_UPGRADE=true needs MIROPS_UPGRADE_SOURCE (--upgrade-source) — the URL of the UpgradeAnalysis " +
 				"report, e.g. s3://…/pre-upgrade-1.36.mirops")
 		}
-		if len(namespaces) > 0 {
-			ns, others, err := namespacesStatus(&m, namespaces)
+		if file != "" {
+			res, err := checkImpact(&m)
+			if err != nil {
+				return fail("%v", err)
+			}
+			out.Checks.Impact = res
+		}
+		if names := stateNamespaces(&m); len(names) > 0 {
+			ns, others, err := namespacesStatus(&m, names)
 			if err != nil {
 				return fail("%v", err)
 			}
@@ -240,11 +256,104 @@ func runScan(cmd *cobra.Command) int {
 		renderScan(out)
 	}
 
-	// Only the upgrade verdict gates; a namespace's state is information.
-	if enforce && out.Checks.Upgrade != nil && out.Checks.Upgrade.Blocking {
+	// The upgrade verdict and the impact of a change gate; a namespace's state is information.
+	if enforce && ((out.Checks.Upgrade != nil && out.Checks.Upgrade.Blocking) ||
+		(out.Checks.Impact != nil && out.Checks.Impact.Blocking)) {
 		return exitBlocked
 	}
 	return exitOK
+}
+
+// checkImpact reads the change at --file and judges it against the mirror's graph.
+func checkImpact(m *report.MirrorReport) (*impact.Result, error) {
+	if m.Graph == nil {
+		return nil, fmt.Errorf("the mirror report has no dependency graph, so the impact of a change can't be judged")
+	}
+	generated, err := time.Parse(time.RFC3339, m.GeneratedAt)
+	if err != nil {
+		return nil, fmt.Errorf("the mirror report has no valid generatedAt (%q), so its age can't be checked", m.GeneratedAt)
+	}
+	if age := time.Since(generated); age > maxMirrorAge {
+		unit := time.Minute
+		if age < time.Minute {
+			unit = time.Second
+		}
+		return nil, fmt.Errorf("the mirror report is %s old (--max-mirror-age %s) — the operator may have stopped "+
+			"rebuilding it; judging a change against it could pass something that is broken now",
+			age.Round(unit), maxMirrorAge)
+	}
+	set, err := input.Read(file, os.Stdin)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireKnownNamespaces(m, set); err != nil {
+		return nil, err
+	}
+	return impact.Evaluate(set, m.Graph, namespaces), nil
+}
+
+// requireKnownNamespaces fails on a -n namespace that is neither in the mirror nor in the change: most
+// likely a typo, and judging only a namespace nothing touches would pass the gate without checking.
+// Objects without a namespace count toward a single -n, which is where they're judged.
+func requireKnownNamespaces(m *report.MirrorReport, set *change.Set) error {
+	known := map[string]bool{}
+	if m.Risk != nil {
+		for _, n := range m.Risk.ByNamespace {
+			known[n.Namespace] = true
+		}
+	}
+	touched := map[string]bool{}
+	for _, c := range set.Changes {
+		switch {
+		case c.Kind == "Namespace":
+			touched[c.Name] = true
+		case c.Namespace != "":
+			touched[c.Namespace] = true
+		case len(namespaces) == 1:
+			touched[namespaces[0]] = true
+		}
+	}
+	var unknown []string
+	for _, n := range namespaces {
+		if n != allNamespaces && !known[n] && !touched[n] {
+			unknown = append(unknown, fmt.Sprintf("%q", n))
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(touched))
+	for n := range touched {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	hint := "it touches no namespace"
+	if len(names) > 0 {
+		hint = "it touches " + strings.Join(names, ", ")
+	}
+	return fmt.Errorf("namespace %s (-n) isn't in mirror %q or in this change (%s) — check the name",
+		strings.Join(unknown, ", "), m.Mirror, hint)
+}
+
+// stateNamespaces returns the -n namespaces whose current state to show. With --file, a namespace the
+// mirror doesn't know yet (e.g. one the change creates) is left out instead of failing the run.
+func stateNamespaces(m *report.MirrorReport) []string {
+	if file == "" || len(namespaces) == 0 {
+		return namespaces
+	}
+	known := map[string]bool{}
+	if m.Risk != nil {
+		for _, n := range m.Risk.ByNamespace {
+			known[n.Namespace] = true
+		}
+	}
+	var out []string
+	for _, n := range namespaces {
+		if n == allNamespaces || known[n] {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 func parseUpgradeReport(source string, data []byte) (*report.Report, error) {
@@ -295,6 +404,9 @@ func renderScan(out scanOutput) {
 	}
 	if len(out.Checks.Namespaces) > 0 || out.Checks.OtherHealthyNamespaces > 0 {
 		renderNamespaces(out.Checks.Namespaces, out.Checks.OtherHealthyNamespaces)
+	}
+	if out.Checks.Impact != nil {
+		renderImpact(out.Checks.Impact)
 	}
 	if up := out.Checks.Upgrade; up != nil {
 		if up.Status == "skipped" {
@@ -773,7 +885,8 @@ func init() {
 	scanCmd.Flags().BoolVar(&checkUpgrade, "upgrade", false, "Run the upgrade check against the report at --upgrade-source (env: MIROPS_UPGRADE)")
 	scanCmd.Flags().StringVar(&upgradeSource, "upgrade-source", "", "UpgradeAnalysis report to gate on: path, file://, s3://, azure://, http:// (env: MIROPS_UPGRADE_SOURCE)")
 	scanCmd.Flags().StringSliceVarP(&namespaces, "namespace", "n", nil, "Namespaces to show the state of: one, a comma-separated list, or \"all\" (env: MIROPS_NAMESPACE)")
-	scanCmd.Flags().StringVarP(&file, "file", "f", "", "Manifests to check before deploying — arrives in v0.3.0 (env: MIROPS_FILE)")
+	scanCmd.Flags().StringVarP(&file, "file", "f", "", "What you're about to apply: manifests (file, directory, or - for stdin) or a Terraform plan JSON (env: MIROPS_FILE)")
+	scanCmd.Flags().DurationVar(&maxMirrorAge, "max-mirror-age", time.Hour, "Refuse to judge a change against a mirror report older than this (env: MIROPS_MAX_MIRROR_AGE)")
 	scanCmd.Flags().StringVar(&output, "output", "table", "Output format: table, json (env: MIROPS_OUTPUT)")
 	scanCmd.Flags().DurationVar(&timeout, "timeout", 30*time.Second, "Request timeout (env: MIROPS_TIMEOUT)")
 	scanCmd.Flags().IntVar(&retry, "retry", 3, "Number of retries on failure (env: MIROPS_RETRY)")
