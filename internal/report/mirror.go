@@ -7,7 +7,7 @@ const (
 	KindClusterMirror   = "ClusterMirror"
 )
 
-// MirrorReport is the part of the operator's ClusterMirror report (<name>.mirror) the CLI reads. The
+// MirrorReport is the part of the operator's ClusterMirror report (<name>.mirops, kind ClusterMirror) the CLI reads. The
 // mirror report always exists while the operator runs, so it is the single --source every pipeline
 // points at: it carries the cluster's current state and, for upgrades, whether upgrade analysis is on
 // and where each analysis's report is.

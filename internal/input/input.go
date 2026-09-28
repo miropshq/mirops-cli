@@ -45,14 +45,28 @@ func Read(path string, stdin io.Reader) (*change.Set, error) {
 	return readDir(path)
 }
 
+// readDir reads every .yaml, .yml and .json file under dir and records what it skipped: other files,
+// empty ones, and hidden directories (.git, .terraform, …).
 func readDir(dir string) (*change.Set, error) {
 	var files []string
+	var ignored []change.Note
 	sawTerraform := false
+	ignore := func(p, reason string) {
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			rel = p
+		}
+		ignored = append(ignored, change.Note{What: rel, Reason: reason})
+	}
 	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
+			if p != dir && strings.HasPrefix(d.Name(), ".") {
+				ignore(p+string(filepath.Separator), "hidden directory")
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		switch strings.ToLower(filepath.Ext(p)) {
@@ -63,6 +77,9 @@ func readDir(dir string) (*change.Set, error) {
 			files = append(files, p)
 		case ".tf":
 			sawTerraform = true
+			ignore(p, "Terraform source (only a plan says what will change)")
+		default:
+			ignore(p, "not .yaml, .yml or .json")
 		}
 		return nil
 	})
@@ -82,12 +99,21 @@ func readDir(dir string) (*change.Set, error) {
 		if err != nil {
 			return nil, err
 		}
+		if len(bytes.TrimSpace(data)) == 0 {
+			ignore(f, "empty")
+			continue
+		}
 		s, err := parse(data, f)
 		if err != nil {
 			return nil, err
 		}
 		merge(out, s)
 	}
+	if out.Format == "" {
+		return nil, fmt.Errorf("%s has only empty .yaml, .yml or .json files", dir)
+	}
+	sort.Slice(ignored, func(i, j int) bool { return ignored[i].What < ignored[j].What })
+	out.Ignored = ignored
 	return out, nil
 }
 

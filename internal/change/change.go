@@ -65,6 +65,8 @@ type Set struct {
 	NonKubernetes int    `json:"nonKubernetes,omitempty"`
 	NoOp          int    `json:"noOp,omitempty"`
 	NotEvaluable  []Note `json:"notEvaluable,omitempty"`
+	// Files a directory walk skipped, each with why (What is the path relative to the directory).
+	Ignored []Note `json:"ignored,omitempty"`
 }
 
 // MirrorKind maps a Kubernetes kind to the kind the mirror graph uses for it.

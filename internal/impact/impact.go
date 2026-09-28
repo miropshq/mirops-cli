@@ -34,6 +34,7 @@ type Summary struct {
 	NonKubernetes   int           `json:"nonKubernetes,omitempty"`
 	NoOp            int           `json:"noOp,omitempty"`
 	NotEvaluable    []change.Note `json:"notEvaluable,omitempty"`
+	Ignored         []change.Note `json:"ignored,omitempty"`
 	Namespaces      []string      `json:"namespaces"`
 }
 
@@ -54,7 +55,7 @@ const maxListed = 5
 func Evaluate(set *change.Set, g *report.Graph, namespaces []string) *Result {
 	res := &Result{Summary: Summary{
 		Format: set.Format, Changes: len(set.Changes), NonKubernetes: set.NonKubernetes,
-		NoOp: set.NoOp, NotEvaluable: set.NotEvaluable,
+		NoOp: set.NoOp, NotEvaluable: set.NotEvaluable, Ignored: set.Ignored,
 	}}
 	m := newMirror(g)
 

@@ -9,6 +9,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/miropshq/mirops-cli/internal/change"
 	"github.com/miropshq/mirops-cli/internal/impact"
 	"github.com/miropshq/mirops-cli/internal/input"
 	"github.com/miropshq/mirops-cli/internal/providers"
@@ -58,11 +59,13 @@ var scanCmd = &cobra.Command{
                                      something still in use, or depending on a volume or Service that is
                                      missing or broken. With -n, only changes in those namespaces are judged.
 
-Point --source (MIROPS_SOURCE) at the ClusterMirror report (<name>.mirror). Pointing it at an
-UpgradeAnalysis report (<name>.mirops) gates on that analysis directly. Every flag can be set as
+Point --source (MIROPS_SOURCE) at the ClusterMirror report (<name>.mirops, kind ClusterMirror; from the
+operator's reports service add ?kind=ClusterMirror). Pointing it at an UpgradeAnalysis report gates on
+that analysis directly. Every flag can be set as
 MIROPS_<FLAG>.
 
 Exit codes: 0 passed or nothing to check · 1 blocked (with --enforce) · 2 couldn't evaluate.`,
+	Args: cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
 		os.Exit(runScan(cmd))
 	},
@@ -155,7 +158,7 @@ func runScan(cmd *cobra.Command) int {
 		return fail("--enforce-level must be critical or warning, got %q", enforceLevel)
 	}
 	if source == "" {
-		return fail("--source is required (or set MIROPS_SOURCE) — point it at the ClusterMirror report, e.g. s3://…/default.mirror")
+		return fail("--source is required (or set MIROPS_SOURCE) — point it at the ClusterMirror report, e.g. s3://…/default.mirops")
 	}
 	if upgradeSource != "" && !checkUpgrade {
 		fmt.Fprintln(os.Stderr, "Warning: MIROPS_UPGRADE_SOURCE is set but MIROPS_UPGRADE isn't — the upgrade check didn't run")
@@ -283,7 +286,53 @@ func checkImpact(m *report.MirrorReport) (*impact.Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := requireKnownNamespaces(m, set); err != nil {
+		return nil, err
+	}
 	return impact.Evaluate(set, m.Graph, namespaces), nil
+}
+
+// requireKnownNamespaces fails on a -n namespace that is neither in the mirror nor in the change: most
+// likely a typo, and judging only a namespace nothing touches would pass the gate without checking.
+// Objects without a namespace count toward a single -n, which is where they're judged.
+func requireKnownNamespaces(m *report.MirrorReport, set *change.Set) error {
+	known := map[string]bool{}
+	if m.Risk != nil {
+		for _, n := range m.Risk.ByNamespace {
+			known[n.Namespace] = true
+		}
+	}
+	touched := map[string]bool{}
+	for _, c := range set.Changes {
+		switch {
+		case c.Kind == "Namespace":
+			touched[c.Name] = true
+		case c.Namespace != "":
+			touched[c.Namespace] = true
+		case len(namespaces) == 1:
+			touched[namespaces[0]] = true
+		}
+	}
+	var unknown []string
+	for _, n := range namespaces {
+		if n != allNamespaces && !known[n] && !touched[n] {
+			unknown = append(unknown, fmt.Sprintf("%q", n))
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(touched))
+	for n := range touched {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	hint := "it touches no namespace"
+	if len(names) > 0 {
+		hint = "it touches " + strings.Join(names, ", ")
+	}
+	return fmt.Errorf("namespace %s (-n) isn't in mirror %q or in this change (%s) — check the name",
+		strings.Join(unknown, ", "), m.Mirror, hint)
 }
 
 // stateNamespaces returns the -n namespaces whose current state to show. With --file, a namespace the

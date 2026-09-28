@@ -7,6 +7,9 @@ import (
 	"github.com/miropshq/mirops-cli/internal/impact"
 )
 
+// maxIgnoredListed caps the ignored files printed; --output json has them all.
+const maxIgnoredListed = 10
+
 var formatNames = map[string]string{
 	"yaml": "YAML", "json": "JSON", "terraform-plan": "Terraform plan", "mixed": "YAML and JSON",
 }
@@ -41,6 +44,16 @@ func renderImpact(res *impact.Result) {
 	add(len(s.NotEvaluable), "not evaluable")
 	if len(skipped) > 0 {
 		fmt.Printf("  %s\n", dim("("+strings.Join(skipped, ", ")+")"))
+	}
+	if n := len(s.Ignored); n > 0 {
+		fmt.Printf("  %s\n", dim(fmt.Sprintf("ignored %d file(s):", n)))
+		for i, f := range s.Ignored {
+			if i == maxIgnoredListed {
+				fmt.Printf("    %s\n", dim(fmt.Sprintf("… and %d more (--output json lists them all)", n-i)))
+				break
+			}
+			fmt.Printf("    %s %s\n", f.What, dim("— "+f.Reason))
+		}
 	}
 
 	multiNS := len(s.Namespaces) > 1
