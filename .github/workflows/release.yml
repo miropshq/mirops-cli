@@ -1,9 +1,12 @@
 name: Mirops CLI — CI & Release
 
+# main publishes stable releases (Latest). beta publishes pre-releases — vX.Y.Z-beta.N — to try a
+# version in a real pipeline before it reaches main; they never become Latest.
 on:
   push:
     branches:
       - main
+      - beta
 
 permissions:
   contents: write
@@ -122,6 +125,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.semantic-release.outputs.new_release_version }}
+          # Keep a beta a pre-release: updating the release must not clear the flag semantic-release set.
+          prerelease: ${{ github.ref_name == 'beta' }}
           files: |
             dist/mirops-*
             dist/checksums.txt
@@ -145,3 +150,25 @@ jobs:
                 }
               ]
             }
+
+  # ─── Bring beta up to date after a stable release ─────────────────────────────
+  # beta reaches main as a squash, so main's release commit isn't on beta. Merging main back keeps the
+  # next beta counting from the release just published (vX.Y.Z → vX.Y+1.0-beta.1). A push with
+  # GITHUB_TOKEN triggers no workflow, so this publishes nothing. A conflict fails the job: merge by hand.
+  sync-beta:
+    name: Merge main into beta
+    runs-on: ubuntu-latest
+    needs: [semantic-release, upload]
+    if: github.ref_name == 'main' && needs.semantic-release.outputs.new_release_published == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: beta
+          fetch-depth: 0
+
+      - name: Merge main into beta
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-edit origin/main
+          git push origin beta
