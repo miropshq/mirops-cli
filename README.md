@@ -258,8 +258,6 @@ Every flag can be set through the environment as `MIROPS_<FLAG>` (dashes become 
 | `--enforce` | `MIROPS_ENFORCE` | Exit `1` when a check blocks |
 | `--enforce-level` | `MIROPS_ENFORCE_LEVEL` | Minimum upgrade level that blocks: `critical` (default) or `warning` |
 | `--output` | `MIROPS_OUTPUT` | `table` or `json` |
-| `--timeout` | `MIROPS_TIMEOUT` | Request timeout duration |
-| `--retry` | `MIROPS_RETRY` | Number of retries on failure |
 
 SaaS-related flags are present but not implemented yet:
 
