@@ -116,13 +116,13 @@ Swap the binary name in the `curl` URL for your platform.
 curl -fsSL -O https://github.com/miropshq/mirops-cli/releases/latest/download/mirops-linux-amd64
 
 # Pin a version (reproducible — recommended for CI)
-curl -fsSL -O https://github.com/miropshq/mirops-cli/releases/download/v0.2.0/mirops-linux-amd64
+curl -fsSL -O https://github.com/miropshq/mirops-cli/releases/download/v0.3.0/mirops-linux-amd64
 
 # Try a beta before it's released — pre-releases are tagged vX.Y.Z-beta.N and never become "latest"
 curl -fsSL -O https://github.com/miropshq/mirops-cli/releases/download/v0.3.0-beta.1/mirops-linux-amd64
 ```
 
-Betas are published from the `beta` branch; a stable release follows when it's merged into `main`.
+Betas are published from the `beta` branch; a stable release follows when `beta` is merged into `main`. See [How releases work](CONTRIBUTING.md#how-releases-work).
 
 ### Verify the checksum (optional)
 
