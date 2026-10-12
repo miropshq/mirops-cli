@@ -151,24 +151,41 @@ jobs:
               ]
             }
 
-  # ─── Bring beta up to date after a stable release ─────────────────────────────
-  # beta reaches main as a squash, so main's release commit isn't on beta. Merging main back keeps the
-  # next beta counting from the release just published (vX.Y.Z → vX.Y+1.0-beta.1). A push with
-  # GITHUB_TOKEN triggers no workflow, so this publishes nothing. A conflict fails the job: merge by hand.
+  # ─── Reset beta to main after a stable release ────────────────────────────────
+  # Both hops squash: branch → beta, then beta → main. The release on main is a squash of everything on
+  # beta, so beta's own commits are copies main doesn't have — left there, the next beta would count
+  # them again (that's how a docs change once cut v0.4.0-beta.1). Right after the release beta and main
+  # hold the same code, so beta is reset to main: the next beta counts from vX.Y.Z. Only when the code
+  # is identical — if beta took a pull request after the release one, the job fails instead of
+  # dropping it, and beta is reset by hand. beta takes changes only through pull requests; this force
+  # push gets through as the release bot GitHub App, the ruleset's one bypass. Its push runs this
+  # workflow on beta, which finds nothing to release.
   sync-beta:
-    name: Merge main into beta
+    name: Reset beta to main
     runs-on: ubuntu-latest
     needs: [semantic-release, upload]
     if: github.ref_name == 'main' && needs.semantic-release.outputs.new_release_published == 'true'
     steps:
+      - name: Release bot token
+        id: bot
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write # only to push beta
+
       - uses: actions/checkout@v4
         with:
           ref: beta
           fetch-depth: 0
+          token: ${{ steps.bot.outputs.token }}
 
-      - name: Merge main into beta
+      - name: Reset beta to main
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git merge --no-edit origin/main
-          git push origin beta
+          if ! git diff --quiet origin/main HEAD; then
+            echo "::error::beta has changes that aren't on main — reset it by hand:"
+            git diff --stat origin/main HEAD
+            exit 1
+          fi
+          git reset --hard origin/main
+          git push --force origin beta
