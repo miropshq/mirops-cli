@@ -1,123 +1,58 @@
 # Mirops CLI
 
-`mirops-cli` reads a Mirops upgrade-analysis report and turns it into a command-line decision for humans and CI/CD pipelines. It can print a table, emit JSON, and optionally exit with a non-zero status when the report blocks an upgrade.
+Turn a Mirops report into a clear command-line answer for people and pipelines. The CLI renders mirror state, evaluates change impact when requested, and enforces the operator’s deterministic upgrade decision.
 
-The CLI is designed to consume reports produced by the `mirops` Kubernetes operator.
+```mermaid
+flowchart LR
+  M[ClusterMirror report] --> S[mirops scan]
+  S --> H[Human-readable table or JSON]
+  S -->|--enforce| G[CI/CD gate]
+```
 
-## Features
+## Install and run
 
-- Reads reports from local files and `file://` sources
-- Supports `http://` and `https://` report URLs
-- Supports `s3://` and `azure://` report sources through provider implementations
-- Renders the operator's upgrade decision (`SAFE` / `WARNING` / `CRITICAL`)
-- Prints table or JSON output
-- Can enforce the decision by exiting with code `1` when the upgrade is not allowed
-- Supports environment-variable fallbacks for automation
-
-## Requirements
-
-- Go 1.26.2 or newer
-
-## Build
+Requires Go `1.26.2` or newer.
 
 ```sh
 go build -o bin/mirops .
+./bin/mirops scan --source ./report.mirops
 ```
 
-Run from source:
+The source may be a local path, `file://`, `http://`, `https://`, `s3://`, or `azure://` location.
+
+## The workflow
 
 ```sh
-go run . scan --source ./report.json
+# Inspect a mirror report.
+mirops scan --source s3://reports/prod/default.mirops -n payments
+
+# Evaluate the impact of a manifest, rendered Helm/Kustomize output, or Terraform plan.
+mirops scan --source s3://reports/prod/default.mirops -f ./change.yaml
+
+# Enforce an opt-in upgrade-analysis result in CI.
+MIROPS_UPGRADE=true \
+MIROPS_UPGRADE_SOURCE=s3://reports/prod/to-1-35.mirops \
+mirops scan --enforce
 ```
 
-## Usage
+`--enforce` follows `decision.allow`; it does not turn the readiness score into a gate. `SAFE` and `WARNING` allow the upgrade, while `CRITICAL` returns a non-zero exit status with its blockers.
 
-Read a local report:
+## Useful options
 
-```sh
-mirops scan --source ./mirops-report.json
-```
-
-Read a file URL:
-
-```sh
-mirops scan --source file:///tmp/mirops-report.json
-```
-
-Read an HTTP report:
-
-```sh
-mirops scan --source https://example.com/mirops-report.json
-```
-
-Emit JSON:
-
-```sh
-mirops scan --source ./mirops-report.json --output json
-```
-
-Fail the pipeline when the upgrade is not allowed (CRITICAL):
-
-```sh
-mirops scan --source ./mirops-report.json --enforce
-```
-
-Fail also on WARNING (stricter policy):
-
-```sh
-mirops scan --source ./mirops-report.json --enforce --enforce-level warning
-```
-
-## Command Reference
-
-```text
-mirops scan [flags]
-```
-
-| Flag | Environment variable | Description |
-| ---- | -------------------- | ----------- |
-| `--source` | `MIROPS_SOURCE` | Report source: path, `file://`, `s3://`, `azure://`, `http://`, or `https://` |
-| `--enforce` | `MIROPS_ENFORCE` | Exit with code `1` based on the report's decision |
-| `--enforce-level` | `MIROPS_ENFORCE_LEVEL` | Minimum level that fails `--enforce`: `critical` (default) or `warning` |
-| `--target-version` | `MIROPS_TARGET_VERSION` | Expected target version |
-| `--output` | `MIROPS_OUTPUT` | Output format: `table` or `json` |
-| `--timeout` | `MIROPS_TIMEOUT` | Request timeout duration |
-| `--retry` | `MIROPS_RETRY` | Number of retries on failure |
-
-SaaS-related flags are present but not implemented yet:
-
-| Flag | Environment variable |
-| ---- | -------------------- |
-| `--api-url` | `MIROPS_API_URL` |
-| `--api-token` | `MIROPS_API_TOKEN` |
-| `--cluster` | `MIROPS_CLUSTER` |
-
-## Decision Logic
-
-The decision is computed by the `mirops` operator from deterministic facts (incompatible add-ons, lost PVCs, PDBs, CPU/memory pressure, pods not ready) and reported in `decision`. The CLI renders it verbatim — it does **not** recompute the gate from the score (`scores.total` is a readiness gauge only).
-
-| Result | Meaning |
-| ------ | ------- |
-| `CRITICAL` | `decision.allow == false` — do not upgrade; reasons listed as blockers |
-| `WARNING` | Upgrade possible but issues were detected |
-| `SAFE` | Cluster ready, upgrade recommended |
-
-With `--enforce`, the CLI exits `1` when the upgrade is not allowed (CRITICAL). `--enforce-level warning` is stricter and also fails on WARNING.
+| Option | Environment fallback | Purpose |
+| --- | --- | --- |
+| `--source` | `MIROPS_SOURCE` | Mirror report location. |
+| `-n` | — | Show a namespace’s current state; informational only. |
+| `-f` | — | Evaluate the impact of a change. |
+| `--enforce` | `MIROPS_ENFORCE` | Fail the pipeline only when the selected decision blocks it. |
+| `--output json` | `MIROPS_OUTPUT` | Produce machine-readable output. |
 
 ## Development
 
-Run tests:
-
 ```sh
 go test ./...
-```
-
-Format the code:
-
-```sh
 go fmt ./...
 ```
 
-## License
+The CLI is an open-source member of the Mirops ecosystem. See the [operator](https://github.com/miropshq/mirops), [documentation portal](https://github.com/miropshq/mirops-docs), and [LICENSE](LICENSE) for more context.
 
-See `LICENSE`.
