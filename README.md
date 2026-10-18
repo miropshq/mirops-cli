@@ -12,6 +12,8 @@ The `mirops-cli` is the pipeline gate for [Mirops](https://github.com/miropshq/m
 
 The CLI reads the mirror report, not the live cluster. A pipeline needs no kubeconfig and adds no load to the Kubernetes API server. Reports can come from a local file, HTTP(S), Amazon S3, or Azure Blob Storage.
 
+![CLI report flow from a local or remote report source through selected checks to table or JSON output](docs/readme-report-flow.svg)
+
 ## Install
 
 Download the release binary for your platform from the [latest release](https://github.com/miropshq/mirops-cli/releases/latest), make it executable, and place it on your `PATH`. No `sudo` is required.
@@ -65,6 +67,8 @@ Use `-f` / `--file` with rendered YAML or JSON, a directory of manifests, standa
 
 The check reports existing problems and the blast radius as context; it blocks only on what the proposed change breaks. It does not accept source files that need rendering first, such as Helm values, Kustomize configuration, Terraform source files, templates, or binary plans. Render those to YAML or JSON before scanning.
 
+![Impact check comparing rendered changes with the ClusterMirror and blocking only breaks introduced by the proposed change](docs/readme-impact-flow.svg)
+
 ### Namespace state
 
 Set `-n` / `--namespace` to one namespace, a comma-separated list, or `all`. This check reports at-risk components and their dependents, but never blocks a pipeline. When used with `-f`, it limits impact evaluation to the named namespaces.
@@ -101,6 +105,8 @@ The operator calculates the decision from deterministic facts, including incompa
 | `0` | Passed, or no upgrade check was needed. |
 | `1` | A check blocked and enforcement is enabled. |
 | `2` | The CLI could not evaluate the request, such as a missing or unreadable report, invalid option, or unsupported unrendered input. |
+
+![UpgradeAnalysis decision and enforcement flow; readiness score remains informational](docs/readme-upgrade-flow.svg)
 
 ## Command reference
 
