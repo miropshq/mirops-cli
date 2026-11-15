@@ -141,13 +141,22 @@ Flags override environment variables. Pointing `--source` at an UpgradeAnalysis 
 
 ## Credentials
 
-`mirops scan` reads each source with the pipeline's own credentials for its scheme — it has no credential flags:
+`mirops scan` only reads the report, with the pipeline's own credentials for its scheme — it has no credential flags:
 
-| Source | Credentials |
-| --- | --- |
-| `s3://` | The AWS SDK chain: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`, a web identity (`aws-actions/configure-aws-credentials` with a role, IRSA), `AWS_PROFILE`, or the machine's role. Set `AWS_REGION` to the bucket's region. Needs only `s3:GetObject` on the report. |
-| `azure://` | `DefaultAzureCredential`: `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_CLIENT_SECRET`, workload identity, or managed identity. Needs read access to the blob. |
-| `http(s)://` | None — e.g. the operator's reports service, `http://mirops-reports.mirops:8084/reports/<name>.mirops?kind=ClusterMirror`, from inside the cluster. |
+| Source | Credentials | Permission |
+| --- | --- | --- |
+| `s3://` | The AWS SDK's default chain — see below. Set `AWS_REGION` to the bucket's region. | `s3:GetObject` on the report |
+| `azure://` | `DefaultAzureCredential`: `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_CLIENT_SECRET`, workload identity, or managed identity. | Read access to the blob |
+| `http(s)://` | None — e.g. the operator's reports service, `http://mirops-reports.mirops:8084/reports/<name>.mirops?kind=ClusterMirror`, from inside the cluster. | — |
+
+For `s3://`, use whichever fits where the pipeline runs — no stored keys in the first two:
+
+- **GitHub Actions (or any CI with OIDC)** — an IAM role assumed through the CI's identity provider, e.g. `aws-actions/configure-aws-credentials` with `role-to-assume`.
+- **A runner pod on EKS** — **IRSA**: annotate the runner's service account with `eks.amazonaws.com/role-arn: <role>`, and the role's trust allows that service account. EKS Pod Identity works the same way.
+- **Static keys** — `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (and `AWS_SESSION_TOKEN`), or `AWS_PROFILE`.
+- **EC2** — the instance's role.
+
+This role only reads the report. It's not the operator's: the operator writes the report with its own role (IRSA on its `mirops-controller-manager` service account) and `s3:PutObject`.
 
 ## Build from source
 
