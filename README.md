@@ -1,6 +1,6 @@
 # Mirops CLI
 
-The `mirops-cli` is the pipeline gate for [Mirops](https://github.com/miropshq/mirops). It reads reports from the Mirops Kubernetes operator and answers whether an upgrade or proposed change is safe to proceed. It trusts the operator's deterministic decision; it does not recompute the gate from the readiness score.
+The `mirops-cli` is the pipeline gate for [Mirops](https://github.com/miropshq/mirops). It reads the Cluster Mirror report the Mirops operator publishes and answers, before you deploy, whether the change would break something running — and, when upgrade analysis is on, whether the cluster is ready for the next Kubernetes version. For upgrades it trusts the operator's deterministic decision; it never makes a gate from the readiness score.
 
 ## What it checks
 
@@ -10,7 +10,7 @@ The `mirops-cli` is the pipeline gate for [Mirops](https://github.com/miropshq/m
 | Namespace state | `-n` / `MIROPS_NAMESPACE` | What is at risk in selected namespaces, and what depends on it? | No |
 | Upgrade readiness | `--upgrade` / `MIROPS_UPGRADE` | Does the UpgradeAnalysis report allow the target Kubernetes upgrade? | Yes, with `--enforce` |
 
-The CLI reads the mirror report, not the live cluster. A pipeline needs no kubeconfig and adds no load to the Kubernetes API server. Reports can come from a local file, HTTP(S), Amazon S3, or Azure Blob Storage.
+The CLI reads the mirror report, not the live cluster, so it adds no load to the Kubernetes API server. Reports can come from a local file, HTTP(S), Amazon S3, or Azure Blob Storage — with the report in S3 or Azure Blob, a pipeline needs no kubeconfig.
 
 ![CLI report flow from a local or remote report source through selected checks to table or JSON output](docs/readme-report-flow.svg)
 
@@ -37,29 +37,40 @@ mirops --version
 
 Pin a version in CI by replacing `releases/latest` in the download URL with a version tag, such as `releases/download/v0.3.0`.
 
-## Common workflows
+Betas are published from the `beta` branch as pre-releases tagged `vX.Y.Z-beta.N`, and never become `latest`; a stable release follows when `beta` is merged into `main` — see [How releases work](CONTRIBUTING.md#how-releases-work). Download one by its tag, for example `releases/download/v0.3.0-beta.1/mirops-linux-amd64`.
 
-Point `MIROPS_SOURCE` at a ClusterMirror report, then choose the checks you want:
+To verify a download:
 
 ```sh
-# Show the report as a table
-mirops scan --source ./report.mirops
-
-# Emit JSON for another tool
-mirops scan --source ./report.mirops --output json
-
-# Enforce the operator's upgrade decision
-mirops scan --source ./report.mirops --enforce
-
-# Also block on WARNING
-mirops scan --source ./report.mirops --enforce --enforce-level warning
-
-# Evaluate rendered Kubernetes manifests against the mirror
-mirops scan --source ./report.mirops --file k8s/ --namespace payments --enforce
-
-# Show current state for several namespaces (informational only)
-mirops scan --source ./report.mirops --namespace payments,orders
+curl -fsSL -O https://github.com/miropshq/mirops-cli/releases/latest/download/checksums.txt
+shasum -a 256 --check --ignore-missing checksums.txt   # macOS
+sha256sum --check --ignore-missing checksums.txt        # Linux
 ```
+
+## Common workflows
+
+Point `MIROPS_SOURCE` (`--source`) at the ClusterMirror report, then choose the checks with the inputs you give. At least one is needed — with none, `mirops scan` exits `2` (*nothing to scan*):
+
+```sh
+# Impact of a change: blocks the deploy when it would break something running
+mirops scan --source ./default.mirops --file k8s/ --namespace payments --enforce
+helm template payments ./chart | mirops scan --source ./default.mirops --file - --enforce
+terraform show -json plan.out | mirops scan --source ./default.mirops --file - --enforce
+
+# Namespaces' state (informational, never blocks)
+mirops scan --source ./default.mirops --namespace payments,orders
+
+# Upgrade gate on an UpgradeAnalysis report (opt-in)
+mirops scan --source ./default.mirops --upgrade --upgrade-source ./to-1-35.mirops --enforce
+
+# The same, but also block on WARNING
+mirops scan --source ./default.mirops --upgrade --upgrade-source ./to-1-35.mirops --enforce --enforce-level warning
+
+# JSON instead of the table, for another tool
+mirops scan --source ./default.mirops --namespace payments --output json
+```
+
+In a pipeline, set the same values as `MIROPS_*` environment variables and run `mirops scan`.
 
 ### Impact of a change
 
@@ -126,7 +137,17 @@ mirops scan [flags]
 | `--enforce-level` | `MIROPS_ENFORCE_LEVEL` | Minimum upgrade decision that blocks: `critical` (default) or `warning`. |
 | `--output` | `MIROPS_OUTPUT` | Output format: `table` or `json`. |
 
-Flags override environment variables. SaaS options `--api-url`, `--api-token`, and `--cluster` are reserved and are not implemented in the open-source CLI.
+Flags override environment variables. Pointing `--source` at an UpgradeAnalysis report instead gates on that analysis directly, as in 0.1.0. SaaS options `--api-url`, `--api-token`, and `--cluster` are reserved and are not implemented in the open-source CLI.
+
+## Credentials
+
+`mirops scan` reads each source with the pipeline's own credentials for its scheme — it has no credential flags:
+
+| Source | Credentials |
+| --- | --- |
+| `s3://` | The AWS SDK chain: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`, a web identity (`aws-actions/configure-aws-credentials` with a role, IRSA), `AWS_PROFILE`, or the machine's role. Set `AWS_REGION` to the bucket's region. Needs only `s3:GetObject` on the report. |
+| `azure://` | `DefaultAzureCredential`: `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_CLIENT_SECRET`, workload identity, or managed identity. Needs read access to the blob. |
+| `http(s)://` | None — e.g. the operator's reports service, `http://mirops-reports.mirops:8084/reports/<name>.mirops?kind=ClusterMirror`, from inside the cluster. |
 
 ## Build from source
 
