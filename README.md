@@ -37,9 +37,9 @@ mirops --version
 
 Pin a version in CI by replacing `releases/latest` in the download URL with a version tag, such as `releases/download/v0.3.0`.
 
-## Common workflows
+Betas are published from the `beta` branch as pre-releases tagged `vX.Y.Z-beta.N`, and never become `latest`; a stable release follows when `beta` is merged into `main` — see [How releases work](CONTRIBUTING.md#how-releases-work). Download one by its tag, for example `releases/download/v0.3.0-beta.1/mirops-linux-amd64`.
 
-Point `MIROPS_SOURCE` at a ClusterMirror report, then choose the checks you want:
+To verify a download:
 
 ```sh
 # Show the report as a table
@@ -126,7 +126,17 @@ mirops scan [flags]
 | `--enforce-level` | `MIROPS_ENFORCE_LEVEL` | Minimum upgrade decision that blocks: `critical` (default) or `warning`. |
 | `--output` | `MIROPS_OUTPUT` | Output format: `table` or `json`. |
 
-Flags override environment variables. SaaS options `--api-url`, `--api-token`, and `--cluster` are reserved and are not implemented in the open-source CLI.
+Flags override environment variables. Pointing `--source` at an UpgradeAnalysis report instead gates on that analysis directly, as in 0.1.0. SaaS options `--api-url`, `--api-token`, and `--cluster` are reserved and are not implemented in the open-source CLI.
+
+## Credentials
+
+`mirops scan` reads each source with the pipeline's own credentials for its scheme — it has no credential flags:
+
+| Source | Credentials |
+| --- | --- |
+| `s3://` | The AWS SDK chain: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`, a web identity (`aws-actions/configure-aws-credentials` with a role, IRSA), `AWS_PROFILE`, or the machine's role. Set `AWS_REGION` to the bucket's region. Needs only `s3:GetObject` on the report. |
+| `azure://` | `DefaultAzureCredential`: `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_CLIENT_SECRET`, workload identity, or managed identity. Needs read access to the blob. |
+| `http(s)://` | None — e.g. the operator's reports service, `http://mirops-reports.mirops:8084/reports/<name>.mirops?kind=ClusterMirror`, from inside the cluster. |
 
 ## Build from source
 
